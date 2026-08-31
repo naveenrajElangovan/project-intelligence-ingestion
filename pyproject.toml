@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "project-intelligence-ingestion"
+version = "0.1.0"
+description = "Independent provider ingestion and Chroma indexing service"
+requires-python = ">=3.12"
+dependencies = [
+  "cryptography>=50,<51",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "chromadb>=1.5,<2",
+  "pyjwt[crypto]>=2.10,<3",
+  "pydantic-settings>=2.10,<3",
+  "azure-identity>=1.24,<2",
+  "azure-data-tables>=12.7,<13",
+  "beautifulsoup4>=4.13,<5",
+  "langchain-core>=1.0,<2",
+  "langchain-text-splitters>=1.0,<2",
+  "langgraph>=1.0,<2",
+  "pypdf>=6,<7",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.4,<9"]
+worker = [
+  "azure-servicebus==7.14.3",
+  "docling==2.120.1",
+  "transformers==5.8.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

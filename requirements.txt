@@ -1,0 +1,15 @@
+cryptography==50.0.0
+fastapi==0.141.1
+httpx==0.28.1
+chromadb-client==1.5.2
+pyjwt[crypto]==2.13.0
+pydantic-settings==2.15.0
+azure-identity==1.24.0
+azure-data-tables==12.7.0
+beautifulsoup4==4.15.0
+langchain-core==1.5.5
+langchain-text-splitters==1.1.2
+langgraph==1.2.11
+pypdf==6.16.1
+sentence-transformers==5.7.0
+uvicorn[standard]==0.52.3
