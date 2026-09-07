@@ -2,7 +2,10 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
+from collections import Counter
+from statistics import median
 from pathlib import Path
 from app.chroma_collections import (
     project_collection_metadata,
@@ -23,6 +26,7 @@ _RESERVED_METADATA_KEYS = {
 
 _VOCABULARY_RECORD_KIND = "__vocabulary__"
 _VOCABULARY_PAGE_SIZE = 500
+logger = logging.getLogger(__name__)
 
 class ChromaVectorStore:
     def __init__(self, host: str, port: int, collection_name: str, embedder: object) -> None:
@@ -104,6 +108,12 @@ class ChromaVectorStore:
             offset += len(values)
 
         vocabulary = _observed_vocabulary(project_id, metadatas)
+        logger.info(
+            "corpus_profile project_id=%s stats=%s recommended_retrieval_profile=%s human_approval_required=true",
+            project_id,
+            vocabulary["corpus_stats"],
+            vocabulary["recommended_retrieval_profile"],
+        )
         document = json.dumps(vocabulary, sort_keys=True, separators=(",", ":"))
         vector = await asyncio.to_thread(self._embedder.embed_passages, [document])
         metadata = {
@@ -221,13 +231,42 @@ def _observed_vocabulary(
         )
         if Path(value).suffix
     }
+    source_type_counts = Counter(
+        str(metadata.get("source_type") or "").strip().upper()
+        for metadata in metadatas
+        if str(metadata.get("source_type") or "").strip()
+    )
+    source_chunk_counts = Counter(
+        str(metadata.get("source_id") or "").strip()
+        for metadata in metadatas
+        if str(metadata.get("source_id") or "").strip()
+    )
+    source_count = len(source_chunk_counts)
+    chunk_count = len(metadatas)
+    median_chunks = float(median(source_chunk_counts.values())) if source_chunk_counts else 0.0
+    # A recommendation is evidence for a human configuration decision, never a
+    # runtime override. Narrow/deep corpora start with a wider page allowance.
+    recommended_cap = 25 if source_count and median_chunks >= 20 else 12 if median_chunks >= 8 else 3
     return {
         "record_kind": _VOCABULARY_RECORD_KIND,
         "project_id": project_id,
         "entities": observed("entity"),
         "doc_categories": observed("doc_category"),
         "providers": observed("provider", uppercase=True),
-        "source_types": observed("source_type", uppercase=True),
+        "source_types": sorted(
+            source_type for source_type, count in source_type_counts.items() if count >= 5
+        ),
+        "source_type_counts": dict(sorted(source_type_counts.items())),
         "code_extensions": sorted(code_extensions),
         "languages": observed("language"),
+        "corpus_stats": {
+            "sources": source_count,
+            "chunks": chunk_count,
+            "median_chunks_per_source": median_chunks,
+        },
+        "recommended_retrieval_profile": {
+            "maxChunksPerSource": recommended_cap,
+            "rerankTopN": 8,
+            "mixedSourceTopN": 8,
+        },
     }

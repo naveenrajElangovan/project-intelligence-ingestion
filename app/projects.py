@@ -71,7 +71,6 @@ class IngestionProject:
             raise ValueError("A repository-specific operation requires one repository mapping.")
         return self.repositories[0]
 
-
 class ProjectReader(Protocol):
     async def get(self, project_id: str) -> IngestionProject | None: ...
 

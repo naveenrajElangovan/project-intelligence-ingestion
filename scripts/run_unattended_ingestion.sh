@@ -48,7 +48,8 @@ LOG_FILE="${RUNTIME_DIRECTORY}/ingestion.log"
   echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) run_ingestion $*"
 } >>"${LOG_FILE}"
 set -o pipefail
-.venv/bin/python -u -m scripts.run_ingestion "$@" 2>&1 | tee -a "${LOG_FILE}"
+PI_INGEST_METRICS_PUSHGATEWAY_URL="${PI_INGEST_METRICS_PUSHGATEWAY_URL:-http://127.0.0.1:9091}" \
+  .venv/bin/python -u -m scripts.run_ingestion "$@" 2>&1 | tee -a "${LOG_FILE}"
 status="${PIPESTATUS[0]}"
 echo "=== exit ${status}" >>"${LOG_FILE}"
 if (( status != 0 )); then

@@ -6,7 +6,7 @@ import pytest
 
 from app.models import SourceChunk, SourceDocument
 from app.projects import VectorStoreRoute
-from app.vector import ChromaVectorStore
+from app.vector import ChromaVectorStore, _observed_vocabulary
 
 
 class FakeEmbedder:
@@ -129,3 +129,23 @@ def test_project_vocabulary_is_rebuilt_from_persisted_chunk_metadata() -> None:
     assert vocabulary["code_extensions"] == [".rs"]
     assert vocabulary["languages"] == ["en", "es"]
     assert collection.written["metadatas"][0]["record_kind"] == "__vocabulary__"
+
+
+def test_vocabulary_requires_five_observations_and_reports_corpus_shape() -> None:
+    records = [
+        {"source_id": "long-page", "source_type": "PAGE", "language": "en"}
+        for _ in range(25)
+    ] + [
+        {"source_id": "stray-issue", "source_type": "ISSUE", "language": "en"}
+    ]
+
+    vocabulary = _observed_vocabulary("DEMO", records)
+
+    assert vocabulary["source_types"] == ["PAGE"]
+    assert vocabulary["source_type_counts"] == {"ISSUE": 1, "PAGE": 25}
+    assert vocabulary["corpus_stats"] == {
+        "sources": 2,
+        "chunks": 26,
+        "median_chunks_per_source": 13.0,
+    }
+    assert vocabulary["recommended_retrieval_profile"]["maxChunksPerSource"] == 12

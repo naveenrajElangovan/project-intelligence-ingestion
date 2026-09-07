@@ -16,6 +16,7 @@ from app.visual import resolve_markdown_asset_paths
 from app.projects import IngestionProject
 from app.state import ManifestStore
 from app.workflow import DocumentIngestionWorkflow
+from app.telemetry import observe_scope, record_document_failure
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,12 @@ class IngestionService:
     async def _ingest_github_unlocked(
         self, project: IngestionProject, full: bool
     ) -> tuple[ProviderIngestionResult, ...]:
+        with observe_scope("GITHUB", full=full):
+            return await self._ingest_github_scopes(project, full)
+
+    async def _ingest_github_scopes(
+        self, project: IngestionProject, full: bool
+    ) -> tuple[ProviderIngestionResult, ...]:
         results: list[ProviderIngestionResult] = []
         for mapping in project.repositories:
             client = GitHubAppClient(self._settings, mapping)
@@ -137,6 +144,7 @@ class IngestionService:
                     ):
                         await self._manifests.touch_manifest(manifest, scan_id)
                         unchanged += 1
+                        record_document_result("GITHUB", "UNCHANGED")
                         continue
                     try:
                         suffix = Path(item.path).suffix.lower()
@@ -214,8 +222,9 @@ class IngestionService:
                             visual_failures += result.visual_failures
                         else:
                             unchanged += 1
-                    except Exception:
+                    except Exception as failure:
                         failed += 1
+                        record_document_failure("GITHUB", failure)
                         logger.exception(
                             "github_source_ingestion_failed project_id=%s repository=%s path=%s",
                             project.project_id,
@@ -305,6 +314,19 @@ class IngestionService:
         documents,
         full: bool,
     ) -> ProviderIngestionResult:
+        with observe_scope(provider, full=full):
+            return await self._run_scope_documents(
+                project, provider, scope, documents, full
+            )
+
+    async def _run_scope_documents(
+        self,
+        project: IngestionProject,
+        provider: str,
+        scope: str,
+        documents,
+        full: bool,
+    ) -> ProviderIngestionResult:
         scan_started = datetime.now(UTC)
         scan_id = uuid4().hex
         discovered = indexed = unchanged = deleted = failed = chunks_written = 0
@@ -332,8 +354,9 @@ class IngestionService:
                     unchanged += 1
                 elif result.operation == "DELETED":
                     deleted += 1
-            except Exception:
+            except Exception as failure:
                 failed += 1
+                record_document_failure(provider, failure)
                 logger.exception(
                     "source_ingestion_failed project_id=%s provider=%s source_id=%s",
                     project.project_id,

@@ -4,7 +4,9 @@ import argparse
 import asyncio
 import json
 
+from app.config import get_settings
 from app.dependencies import get_ingestion_service
+from app.telemetry import push_metrics
 
 
 async def _run() -> None:
@@ -20,13 +22,16 @@ async def _run() -> None:
     parser.add_argument("--target-collection-name")
     parser.add_argument("--target-schema-version")
     args = parser.parse_args()
-    results = await get_ingestion_service().ingest_project(
-        args.project,
-        tuple(args.providers or ("GITHUB", "JIRA", "CONFLUENCE")),
-        full=args.full,
-        target_collection_name=args.target_collection_name,
-        target_schema_version=args.target_schema_version,
-    )
+    try:
+        results = await get_ingestion_service().ingest_project(
+            args.project,
+            tuple(args.providers or ("GITHUB", "JIRA", "CONFLUENCE")),
+            full=args.full,
+            target_collection_name=args.target_collection_name,
+            target_schema_version=args.target_schema_version,
+        )
+    finally:
+        push_metrics(get_settings().metrics_pushgateway_url)
     payload = [
                 {
                     "projectId": value.project_id,

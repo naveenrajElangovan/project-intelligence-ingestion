@@ -171,6 +171,29 @@ cd <workspace>/project-intelligence-ingestion
 .venv/bin/python -m pytest -q
 ```
 
+## Performance monitoring
+
+The HTTP service exposes content-safe Prometheus metrics at `GET /metrics`.
+They cover provider-scope duration and outcomes, active scopes, last successful
+run time, per-stage document latency, document outcomes, chunk throughput, and
+bounded exception categories. Metric labels never include project/source IDs,
+repository names, paths, URLs, titles, or source content.
+
+The local observability repository scrapes this endpoint over the private
+Compose network. Short-lived CLI and worker processes push their final metrics
+to the local-only Pushgateway, so their observations survive process exit.
+Start it after Backend, RAG, and the ingestion HTTP service:
+
+```bash
+cd <workspace>/project-intelligence-observability
+./scripts/start.sh
+./scripts/verify.sh
+```
+
+Open `http://127.0.0.1:3000/d/pi-ingestion-performance`. Run a normal
+incremental ingestion to populate latency and throughput history; merely
+starting the HTTP service creates no document-processing observations.
+
 ## Create or verify empty infrastructure surfaces
 
 These commands are idempotent and do not ingest source records:

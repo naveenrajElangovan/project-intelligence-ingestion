@@ -10,6 +10,7 @@ from app.models import DocumentIndexResult, SourceChunk, SourceDocument, Structu
 from app.projects import VectorStoreRoute
 from app.state import ManifestStore, SourceManifest
 from app.structured_chunking import StructuredDocumentChunker
+from app.telemetry import observe_document_stage, record_document_result, started
 from app.vector import ChromaVectorStore
 
 
@@ -118,6 +119,7 @@ class DocumentIngestionWorkflow:
         await self._vectors.refresh_project_vocabulary(vector_store, project_id)
 
     async def _inspect(self, state: IngestionState) -> IngestionState:
+        began = started()
         document = state["document"]
         manifest = await self._manifests.get_manifest(
             document.project_id,
@@ -142,9 +144,11 @@ class DocumentIngestionWorkflow:
             operation = "SKIP"
         else:
             operation = "INDEX"
+        observe_document_stage(document.provider, "inspect", began)
         return {"manifest": manifest, "operation": operation}
 
     async def _analyze(self, state: IngestionState) -> IngestionState:
+        began = started()
         document = state["document"]
         credential_sensitive = self._scanner.inspect(document)
         if credential_sensitive:
@@ -158,15 +162,19 @@ class DocumentIngestionWorkflow:
                 asyncio.to_thread(self._chunker.analyze, document),
                 timeout=self._settings.docling_timeout_seconds,
             )
+        observe_document_stage(document.provider, "analyze", began)
         return {"artifact": artifact, "document": document}
 
     async def _split(self, state: IngestionState) -> IngestionState:
+        began = started()
         chunks = await asyncio.to_thread(
             self._chunker.chunk, state["document"], state["artifact"]
         )
+        observe_document_stage(state["document"].provider, "split", began)
         return {"chunks": chunks}
 
     async def _write(self, state: IngestionState) -> IngestionState:
+        began = started()
         document = state["document"]
         operation = state["operation"]
         if operation == "DELETE":
@@ -176,9 +184,11 @@ class DocumentIngestionWorkflow:
                 document.provider,
                 document.source_id,
             )
+            observe_document_stage(document.provider, "write", began)
             return {"result": DocumentIndexResult("DELETED")}
         chunks = state.get("chunks", ())
         await self._vectors.replace_document(state["vector_store"], document, chunks)
+        observe_document_stage(document.provider, "write", began)
         visual = state["artifact"].visual
         return {
             "result": DocumentIndexResult(
@@ -191,15 +201,20 @@ class DocumentIngestionWorkflow:
         }
 
     async def _commit(self, state: IngestionState) -> IngestionState:
+        began = started()
         operation = state["operation"]
         manifest = state.get("manifest")
         if operation == "SKIP":
             if manifest is not None:
                 await self._manifests.touch_manifest(manifest, state["scan_id"])
+            observe_document_stage(state["document"].provider, "commit", began)
+            record_document_result(state["document"].provider, "UNCHANGED")
             return {"result": DocumentIndexResult("UNCHANGED")}
         if operation == "DELETE":
             if manifest is not None:
                 await self._manifests.mark_deleted(manifest, state["scan_id"])
+            observe_document_stage(state["document"].provider, "commit", began)
+            record_document_result(state["document"].provider, "DELETED")
             return state
         await self._manifests.save_manifest(
             state["document"],
@@ -210,6 +225,12 @@ class DocumentIngestionWorkflow:
             chunker_version=self._settings.chunker_version,
             embedding_profile=state["vector_store"].embedding_model,
             schema_version=state["vector_store"].schema_version,
+        )
+        observe_document_stage(state["document"].provider, "commit", began)
+        record_document_result(
+            state["document"].provider,
+            "INDEXED",
+            len(state.get("chunks", ())),
         )
         return state
 

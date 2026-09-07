@@ -8,6 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
+    metrics_pushgateway_url: str = ""
     allowed_hosts: str = "localhost,127.0.0.1,testserver"
     docs_enabled: bool = True
     force_https: bool = False

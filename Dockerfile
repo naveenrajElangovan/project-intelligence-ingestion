@@ -21,8 +21,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     torch==2.11.0
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --disable-pip-version-check -r requirements.txt
-COPY app ./app
-COPY scripts ./scripts
+COPY --chown=ingestion:ingestion app ./app
+COPY --chown=ingestion:ingestion scripts ./scripts
 RUN python -m pip install --disable-pip-version-check --no-deps .
 RUN python -m scripts.generate_sbom /opt/project-intelligence-ingestion.cdx.json
 

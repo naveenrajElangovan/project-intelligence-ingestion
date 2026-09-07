@@ -1,0 +1,29 @@
+{
+  "captured_at": "2026-09-07T22:26:31Z",
+  "purpose": "Pre-purge restore checkpoint. Re-ingestion must reproduce these counts before the change is accepted.",
+  "chroma_endpoint": "http://127.0.0.1:8000",
+  "collections": {
+    "T2.0": {
+      "physical_collection": "project-intelligence-t2-0-9403f3e2ad8b",
+      "total_chunks": 5132,
+      "distinct_sources": 1042,
+      "by_source_type": {"CODE": 4336, "PAGE": 776, "ATTACHMENT": 18, "ISSUE": 1, "SYSTEM": 1},
+      "by_provider": {"LOCAL": 4158, "CONFLUENCE": 794, "GITHUB": 178, "JIRA": 1, "INGESTION": 1},
+      "by_access_policy_id": {"project:T2.0": 5132},
+      "by_schema_version": {"3": 5132},
+      "by_language": {"und": 3543, "en": 1187, "es": 385, "mixed": 16, "": 1},
+      "chunks_per_source": {"mean": 4.93, "max": 88, "min": 1}
+    },
+    "T2.0-STORE": {
+      "physical_collection": "project-intelligence-t2-0-store-5b68779e7474",
+      "total_chunks": 619,
+      "distinct_sources": 24,
+      "by_source_type": {"PAGE": 618, "SYSTEM": 1},
+      "by_provider": {"CONFLUENCE": 618, "INGESTION": 1},
+      "by_access_policy_id": {"project:T2.0-STORE": 619},
+      "by_schema_version": {"3": 619},
+      "by_language": {"es": 304, "en": 290, "und": 20, "mixed": 4, "": 1},
+      "chunks_per_source": {"mean": 25.79, "max": 45, "min": 1}
+    }
+  }
+}

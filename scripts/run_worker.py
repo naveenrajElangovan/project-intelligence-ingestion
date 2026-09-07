@@ -8,6 +8,7 @@ from azure.identity import DefaultAzureCredential
 from app.config import get_settings
 from app.dependencies import get_ingestion_service
 from app.jobs import IngestionJob
+from app.telemetry import push_metrics
 
 
 async def _run() -> None:
@@ -58,6 +59,8 @@ async def _run() -> None:
                         await receiver.abandon_message(message)
                 else:
                     await receiver.complete_message(message)
+                finally:
+                    push_metrics(settings.metrics_pushgateway_url)
 
             async for message in receiver:
                 active.add(asyncio.create_task(process(message)))

@@ -1,4 +1,6 @@
 from fastapi import FastAPI, HTTPException, status
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from starlette.responses import Response
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -47,6 +49,10 @@ def create_app() -> FastAPI:
                 "A required service dependency is unavailable.",
             ) from error
         return {"status": "ok", "environment": settings.environment}
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     app.include_router(github_router)
     app.include_router(ingestions_router)

@@ -1,496 +1,631 @@
-# Project Intelligence Ingestion — current architecture
+# Project Intelligence Ingestion — Current Architecture
 
-Last verified against the repository code: 2026-08-31.
+This document presents the production architecture of the Project Intelligence ingestion platform. It explains how approved GitHub, Jira, Confluence, and attachment content moves from source discovery through security inspection, parsing, chunking, embedding, vector persistence, and operational state management.
 
-This is the single architecture reference for the ingestion project. It describes how GitHub,
-Jira, Confluence, and supported attachments become secure, structured, project-isolated Chroma
-records, and how Azure Table state makes the process incremental and retryable.
+The architecture is built around four principles: the backend remains the authority for project mappings and Atlassian credentials; ingestion is the only writer to the retrieval corpus; vector writes complete before operational state is committed; and partial or failed scans never become evidence of deletion.
 
-## 1. Purpose and boundary
+### Diagram color guide
 
-Ingestion is the only writer to the retrieval corpus. It reads project-approved source systems,
-normalizes documents, performs security and structure analysis, chunks content, creates embeddings,
-writes Chroma, and commits operational state.
+- **Blue** identifies API boundaries, entry points, and externally initiated work.
+- **Purple** identifies ingestion processing and transformation stages.
+- **Green** identifies successful outputs, committed state, and persisted data.
+- **Amber** identifies decisions, controls, and conditional paths.
+- **Orange** identifies external providers and dependent platforms.
+- **Red** identifies rejection, failure, quarantine, and retry outcomes.
 
-It owns:
+Every diagram uses a transparent canvas and pure-white text for labels, connectors, notes, messages, and entity attributes. Saturated color fills preserve contrast in dark-mode Markdown viewers.
 
-- GitHub App source access and webhook verification;
-- Jira and Confluence reads through the backend provider gateway;
-- incremental source discovery and deletion reconciliation;
-- content security, quarantine, parsing, and structure-aware chunking;
-- passage embedding and Chroma upsert/delete operations;
-- Azure Table manifests, cursors, leases, scan markers, and quarantine records;
-- project vocabulary records derived from indexed metadata.
+## 1. Deployment / system context
 
-It does not own:
+This diagram establishes the runtime boundary of the ingestion platform. A lightweight HTTP image receives health checks, manual ingestion requests, and verified GitHub webhooks, while a separate worker image contains the heavier parsing, OCR, malware-scanning, and pinned-model dependencies.
 
-- end-user authentication or authorization;
-- direct Azure SQL access;
-- Atlassian refresh-token storage;
-- chat history;
-- online retrieval, reranking, or answer generation.
-
-## 2. System context
+The ingestion service retrieves project configuration from the backend control plane, accesses GitHub with installation tokens, reaches Atlassian only through the backend proxy, stores operational state in Azure Table, and writes project-isolated records to Chroma. Queueing decouples webhook admission from document processing when Azure Service Bus is configured.
 
 ```mermaid
-flowchart LR
-    T["Schedule, CLI, manual API, or webhook"] --> I["Ingestion service"]
-    I -->|"Authenticated mapping request"| B["Backend control plane"]
-    B -->|"Projects and non-secret provider routes"| I
-    I -->|"GitHub App installation token"| G["GitHub API"]
-    I -->|"Allowlisted proxy request"| B
-    B -->|"Rotating OAuth token"| A["Jira / Confluence APIs"]
-    A --> B --> I
-    I -->|"Manifests, cursors, leases"| S["Azure Table Storage"]
-    I -->|"Chunks, vectors, metadata"| C["Chroma\nwrite owner"]
-    R["RAG service"] -->|"Authorized read-only search"| C
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryColor":"#2563EB","primaryTextColor":"#FFFFFF","primaryBorderColor":"#2563EB","lineColor":"#E2E8F0","edgeLabelBackground":"transparent","secondaryColor":"#7C3AED","secondaryTextColor":"#FFFFFF","tertiaryColor":"#059669","tertiaryTextColor":"#FFFFFF","clusterBkg":"#1F2937","clusterBorder":"#94A3B8","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .edgeLabel { color: #FFFFFF !important; background-color: transparent !important; }"}}%%
+flowchart TB
+    subgraph Clients
+        GHW["GitHub App<br/>webhook: merged PR"]
+        OPS["Operator / scheduler<br/>manual trigger"]
+    end
 
-    classDef service fill:#e8f1ff,stroke:#175cd3,color:#111;
-    classDef data fill:#eaf7ea,stroke:#2e7d32,color:#111;
-    classDef external fill:#fff3cd,stroke:#a66b00,color:#111;
-    class I,B,R service;
-    class S,C data;
-    class T,G,A external;
+    subgraph API_Image["HTTP image (Dockerfile) — requirements.txt, CPU torch, no Docling/OCR/ClamAV"]
+        MAIN["app/main.py<br/>FastAPI"]
+        R1["GET /health"]
+        R2["GET /ready"]
+        R3["POST /v1/webhooks/github"]
+        R4["POST /v1/projects/{id}/ingestions"]
+        MW["SecurityHeaders + RequestSizeLimit<br/>webhook_max_body_bytes = 2 MB"]
+        SVC["app/service.py<br/>IngestionService"]
+    end
+
+    subgraph Worker_Image["Worker image (Dockerfile.worker) — Docling, Tesseract, ClamAV, pinned models"]
+        RW["scripts/run_worker.py"]
+        VER["verify_model_artifacts<br/>/opt/model-checksums.json"]
+        ENVOFF["HF_HUB_OFFLINE=1<br/>TRANSFORMERS_OFFLINE=1<br/>DOCLING_ARTIFACTS_PATH=/opt/docling-models"]
+    end
+
+    SB[("Azure Service Bus<br/>queue: pi-document-parsing")]
+    CP["Backend control plane<br/>PI_INGEST_CONTROL_PLANE_URL"]
+    ATL["api.atlassian.com<br/>Jira + Confluence"]
+    GHAPI["api.github.com"]
+    TBL[("Azure Table<br/>piingestionstate")]
+    CHR[("Chroma HttpClient<br/>chroma_host:chroma_port")]
+
+    GHW --> MW --> MAIN
+    OPS --> MW
+    MAIN --> R1 & R2 & R3 & R4
+    R3 --> SVC
+    R4 --> SVC
+    R3 -. "enqueue IngestionJob<br/>when service_bus_namespace set" .-> SB
+    SB --> RW --> SVC
+    RW --> VER
+    SVC --> CP
+    CP -->|"token held by backend"| ATL
+    SVC -->|"installation token"| GHAPI
+    SVC --> TBL
+    SVC --> CHR
+
+    classDef entry fill:#2563EB,stroke:#2563EB,color:#FFFFFF,stroke-width:2px;
+    classDef service fill:#7C3AED,stroke:#7C3AED,color:#FFFFFF,stroke-width:2px;
+    classDef external fill:#C2410C,stroke:#EA580C,color:#FFFFFF,stroke-width:2px;
+    classDef data fill:#059669,stroke:#059669,color:#FFFFFF,stroke-width:2px;
+    class GHW,OPS entry;
+    class MAIN,R1,R2,R3,R4,MW,SVC,RW,VER,ENVOFF service;
+    class CP,ATL,GHAPI external;
+    class SB,TBL,CHR data;
 ```
 
-The backend owns mappings and credentials. Ingestion owns source processing and vector writes. RAG
-owns authorized reads.
+**Presentation takeaway:** the split-image design keeps the public HTTP surface small while concentrating expensive and security-sensitive document processing in an isolated worker runtime.
 
-## 3. Runtime entry points
+## 2. Scope orchestration
 
-| Entry point | Purpose |
-|---|---|
-| `python -m scripts.run_ingestion --project <id>` | Normal incremental project run |
-| `python -m scripts.run_ingestion --project <id> --full` | Full reconciliation or controlled rebuild |
-| `uvicorn app.main:app` | Health/readiness, protected manual triggers, GitHub webhook receiver |
-| `python -m scripts.run_worker` | Queued worker with full binary/Docling dependencies |
-| `scripts/run_unattended_ingestion.sh` | Local orchestration of dependencies and incremental providers |
+This diagram shows how one project/provider scope is coordinated from configuration lookup through lease release. Each scope is protected by a renewable lease, uses an overlap-adjusted cursor for incremental reads, and processes each discovered document through the same bounded workflow.
 
-The normal CLI path does not require a public ingestion port. The HTTP process is needed for
-webhooks and remote/manual triggers.
-
-## 4. Project configuration flow
-
-Projects are not defined independently in the ingestion environment. For every run:
-
-1. the trigger supplies a project ID and optional provider list;
-2. ingestion authenticates to the backend internal API;
-3. the backend loads the active SQL project record;
-4. the backend returns validated GitHub/Jira/Confluence scopes, schedule information, logical
-   Chroma route, schema version, embedding model, and Atlassian gateway metadata;
-5. ingestion converts the payload into an `IngestionProject`;
-6. processing stops if the project is missing, inactive, malformed, or lacks a required integration.
-
-This prevents environment files, queue messages, or webhooks from inventing a project mapping.
-
-## 5. End-to-end ingestion flow
+Cursor advancement and deletion reconciliation are deliberately conservative. Any failure prevents both actions, and a full scan must also meet the deletion safety floor before missing manifests can be treated as deleted.
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryColor":"#2563EB","primaryTextColor":"#FFFFFF","primaryBorderColor":"#2563EB","lineColor":"#E2E8F0","edgeLabelBackground":"transparent","secondaryColor":"#7C3AED","secondaryTextColor":"#FFFFFF","tertiaryColor":"#059669","tertiaryTextColor":"#FFFFFF","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .edgeLabel { color: #FFFFFF !important; background-color: transparent !important; }"}}%%
 flowchart TD
-    A([Trigger]) --> B["Load active mapping from backend"]
-    B --> C["Acquire project/provider scope lease"]
-    C --> D["Enumerate only configured provider scope"]
-    D --> E["Build stable source ID and version"]
-    E --> F["Read Azure Table manifest"]
-    F -->|"Unchanged and component versions match"| T["Touch manifest scan marker"]
-    F -->|"Deleted"| VD["Delete authorized source records in Chroma"]
-    F -->|"New, changed, forced, or component changed"| S["Security inspection"]
-    S -->|Rejected| Q["Record safe quarantine reason"]
-    S -->|Accepted| P["Parse and analyze structure"]
-    P --> H["Create tokenizer-bounded chunks"]
-    H --> V["Embed passages locally"]
-    V --> W["Upsert complete new generation in Chroma"]
-    W --> X["Verify written IDs"]
-    X --> Y["Delete obsolete IDs from prior generation"]
-    Y --> M["Commit manifest in Azure Table"]
-    VD --> MD["Mark manifest deleted"]
-    T --> Z["Advance cursor only after scope success"]
-    M --> Z
-    MD --> Z
-    Z --> PV["Refresh project vocabulary record"]
-    PV --> R["Release lease and report counts"]
+    A["ingest_project(projectId, providers, full)"] --> B["control plane GET<br/>/v1/internal/ingestion/projects/{id}"]
+    B -->|404| B404["return: project not found"]
+    B --> C["build scopes<br/>project|provider|scope"]
+    C --> D{"acquire lease<br/>__lease__, scope_lease_seconds=900"}
+    D -->|"conflict 409 / valid owner"| D2["skip scope"]
+    D -->|"acquired / expired etag takeover"| E{"full run?"}
+    E -->|no| F["cursor = get_cursor() − incremental_overlap_minutes(5)"]
+    E -->|yes| G["cursor = None (full scan)"]
+    F --> H["provider document iterator"]
+    G --> H
+    H --> I["per document: LangGraph workflow"]
+    I --> J{"any failure?<br/>max_document_failures_per_scope=5"}
+    J -->|yes| K["do NOT advance cursor<br/>do NOT reconcile deletions"]
+    J -->|no| L{"full scan?"}
+    L -->|yes| M{"discovered >= deletion_floor_documents?"}
+    M -->|no| K
+    M -->|yes| N["delete manifests where last_seen_run != scan_id"]
+    L -->|no| O["advance cursor"]
+    N --> O
+    O --> P["rebuild __vocabulary__ record"]
+    P --> Q["release lease"]
+    K --> Q
+
+    classDef entry fill:#2563EB,stroke:#2563EB,color:#FFFFFF,stroke-width:2px;
+    classDef process fill:#7C3AED,stroke:#7C3AED,color:#FFFFFF,stroke-width:2px;
+    classDef decision fill:#B45309,stroke:#D97706,color:#FFFFFF,stroke-width:2px;
+    classDef success fill:#059669,stroke:#059669,color:#FFFFFF,stroke-width:2px;
+    classDef stop fill:#DC2626,stroke:#DC2626,color:#FFFFFF,stroke-width:2px;
+    class A,B,C entry;
+    class F,G,H,I,N,O,P,Q process;
+    class D,E,J,L,M decision;
+    class D2,B404,K stop;
 ```
 
-The critical transaction rule is **Chroma first, manifest second**. A failed vector write cannot
-advance the manifest or cursor, so the next run retries the source.
+**Presentation takeaway:** a scope advances only when discovery and document processing are clean, making retries safe and preventing accidental mass deletion.
 
-## 6. Per-document LangGraph
+## 3. Document workflow state machine
 
-`DocumentIngestionWorkflow` runs one source document through a bounded state graph:
+Every source document travels through a small LangGraph state machine. The inspect state determines whether the document can be skipped, must be deleted, or needs complete reprocessing; changed content then moves through analysis, splitting, vector writing, and finally state commit.
+
+The ordering is the transaction boundary: Chroma is updated and verified before the manifest is saved. A failure in security analysis, parsing, embedding, or vector persistence therefore leaves the prior committed manifest intact and makes the document eligible for a safe retry.
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryColor":"#7C3AED","primaryTextColor":"#FFFFFF","primaryBorderColor":"#7C3AED","lineColor":"#E2E8F0","secondaryColor":"#2563EB","secondaryTextColor":"#FFFFFF","tertiaryColor":"#059669","tertiaryTextColor":"#FFFFFF","noteBkgColor":"#B45309","noteBorderColor":"#D97706","noteTextColor":"#FFFFFF","labelColor":"#FFFFFF","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .stateLabel { color: #FFFFFF !important; fill: #FFFFFF !important; } .transition text, .edgeLabel text { fill: #FFFFFF !important; } .transition { color: #FFFFFF !important; }"}}%%
 stateDiagram-v2
-    [*] --> Inspect
-    Inspect --> Commit: unchanged / skip
-    Inspect --> Write: confirmed deletion
-    Inspect --> Analyze: new, changed, forced, or version mismatch
-    Analyze --> Split
-    Split --> Write
-    Write --> Commit
-    Commit --> [*]
+    [*] --> inspect
+    inspect --> commit : SKIP (all 6 versions match)
+    inspect --> write : DELETE (source vanished)
+    inspect --> analyze : INDEX (new / changed / forced)
+    analyze --> split
+    split --> write
+    write --> commit
+    commit --> [*]
+
+    note right of inspect
+      compares manifest vs document:
+      version, content_hash,
+      parser_version (docling-visual-v2),
+      chunker_version (semantic-token-entity-metadata-v9),
+      embedding_profile, schema_version (3)
+    end note
+
+    note right of analyze
+      ContentSecurityScanner.inspect()
+      -> credential_sensitive flag
+      Docling analyze under
+      docling_timeout_seconds=300
+      docling_max_pages=500
+      docling_max_concurrency=2
+    end note
+
+    note right of write
+      1 query prior storage ids
+      2 embed passages
+      3 upsert
+      4 verify by id
+      5 delete prior_ids - new_ids
+    end note
+
+    note right of commit
+      ONLY after Chroma succeeds:
+      save manifest / mark deleted /
+      touch last_seen_run = scan_id
+    end note
 ```
 
-### Inspect
+**Presentation takeaway:** the workflow behaves like a controlled two-system transaction—vector state first, operational state second.
 
-The workflow compares the source against its manifest using:
+## 4. Chunking decision tree
 
-- stable source ID;
-- provider version;
-- normalized content hash;
-- parser version;
-- chunker version;
-- embedding profile;
-- schema version.
+This decision tree explains how documents are routed into format- and domain-specific chunkers. Code, Jira issues, entity contracts, registries, workflows, glossaries, Markdown, tables, HTML, structured logs, and plain text each use a strategy designed to preserve their most useful semantic boundaries.
 
-Any relevant component-version change intentionally causes reprocessing.
-
-### Analyze
-
-The security scanner inspects type, size, signatures, risky formats, embedded secrets, malware
-requirements, and parsing policy. Accepted content is converted into a structured artifact. Parsing
-is concurrency-limited and timeout-bounded.
-
-### Split
-
-The structured chunker chooses the format-specific strategy, preserves useful hierarchy and
-locators, and produces stable `SourceChunk` values with separate evidence and embedding text.
-
-### Write
-
-The vector adapter embeds passages, upserts the full new source generation, verifies it, then
-removes obsolete chunk IDs. Deletion uses a filter containing project, policy, provider, and source.
-
-### Commit
-
-Only after vector success does Azure Table store the new manifest or deletion marker. An unchanged
-record is merely touched with the current scan marker.
-
-## 7. Provider architecture
-
-### GitHub
-
-GitHub automation uses a GitHub App, not a personal access token.
+All routes converge on the same token safety guard, within-source deduplication, metadata enrichment, and identity generation. Each chunk retains verbatim evidence for citation while creating a separate contextual `embedding_text` for retrieval quality.
 
 ```mermaid
-sequenceDiagram
-    participant I as Ingestion
-    participant B as Backend
-    participant G as GitHub API
-    participant S as Azure Table
-    participant C as Chroma
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryColor":"#7C3AED","primaryTextColor":"#FFFFFF","primaryBorderColor":"#7C3AED","lineColor":"#E2E8F0","edgeLabelBackground":"transparent","secondaryColor":"#2563EB","secondaryTextColor":"#FFFFFF","tertiaryColor":"#059669","tertiaryTextColor":"#FFFFFF","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .edgeLabel { color: #FFFFFF !important; background-color: transparent !important; }"}}%%
+flowchart TD
+    D["SourceDocument<br/>(content, mime, title, extension)"] --> R{"route"}
 
-    I->>B: Get mapped repositories and branches
-    I->>G: App JWT → installation token
-    I->>G: Branch head + recursive tree
-    loop Each allowed non-asset file
-        I->>S: Compare blob SHA/manifest
-        alt Changed or new
-            I->>G: Download blob and linked visual assets
-            I->>C: Replace source generation
-            I->>S: Save manifest
-        else Unchanged
-            I->>S: Touch scan marker
+    R -->|".java .js .kt .py .ts .tsx"| C1["_code_values()<br/>RecursiveCharacterTextSplitter per language<br/>code_chunk_max_tokens = 350"]
+    R -->|"provider JIRA, source_type ISSUE"| C2["_issue_values()<br/>summary / description / comments"]
+    R -->|"entity contract markers<br/>bot-rag-01/03/04, ## ENTITY_KEY"| C3["_entity_contract_values()<br/>header + body preserved"]
+    R -->|"registry table<br/>bot-rag-02 or rows > 20"| C4["_registry_table_values()<br/>table_chunk_max_tokens = 300<br/>headers repeated per chunk"]
+    R -->|"workflow title or [FLOW-N]"| C5["_workflow_values()<br/>numbered steps + part numbers"]
+    R -->|"glossary title or ## TERM:"| C6["_glossary_values()<br/>one chunk per term"]
+    R -->|".md .markdown"| C7["_markdown_values()<br/>MarkdownHeaderTextSplitter"]
+    R -->|"CSV / delimited"| C8["_table_values()"]
+    R -->|"HTML"| C9["_html_values()<br/>HTMLSemanticPreservingSplitter"]
+    R -->|"JSON / logs"| C10["_line_values()"]
+    R -->|"plain text"| C11["_section_values()<br/>chunk_max_tokens = 420<br/>overlap = 40"]
+
+    C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 & C10 & C11 --> G["_SharedSentenceTransformerSplitter<br/>hard 512-token bisect guard"]
+    G --> DDUP["dedupe identical content hashes<br/>within the same source"]
+    DDUP --> META["attach metadata:<br/>doc_category, entity_key, application,<br/>identifiers[], chunk_profile,<br/>visual_asset_types/captions/reason_codes"]
+    META --> TXT["build two texts"]
+    TXT --> T1["content = verbatim evidence<br/>(stored as Chroma document)"]
+    TXT --> T2["embedding_text = hierarchy + reference +<br/>locator + metadata + evidence<br/>(this is what gets embedded)"]
+    META --> CID["chunk_id = sha256(<br/>project|provider|source_id|version|<br/>ordinal|digest|chunker_version)"]
+
+    classDef source fill:#2563EB,stroke:#2563EB,color:#FFFFFF,stroke-width:2px;
+    classDef decision fill:#B45309,stroke:#D97706,color:#FFFFFF,stroke-width:2px;
+    classDef route fill:#7C3AED,stroke:#7C3AED,color:#FFFFFF,stroke-width:1.5px;
+    classDef normalize fill:#0F766E,stroke:#0F766E,color:#FFFFFF,stroke-width:2px;
+    classDef output fill:#059669,stroke:#059669,color:#FFFFFF,stroke-width:2px;
+    class D source;
+    class R decision;
+    class C1,C2,C3,C4,C5,C6,C7,C8,C9,C10,C11 route;
+    class G,DDUP,META,TXT normalize;
+    class T1,T2,CID output;
+```
+
+**Presentation takeaway:** retrieval context is enriched without changing the evidence that downstream answers cite.
+
+## 5. Embedding path
+
+This diagram covers local passage embedding and its compatibility controls. The embedding model is loaded once per process from pinned local artifacts, forced into offline and non-remote-code operation, and protected by locks around model loading and inference.
+
+Passage prefixes are normalized, content is encoded in bounded batches, and every vector is dimension-checked before Chroma receives it. Query prefixing belongs to the RAG service, which must use a compatible model and dimension contract.
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryColor":"#2563EB","primaryTextColor":"#FFFFFF","primaryBorderColor":"#2563EB","lineColor":"#E2E8F0","edgeLabelBackground":"transparent","secondaryColor":"#7C3AED","secondaryTextColor":"#FFFFFF","tertiaryColor":"#059669","tertiaryTextColor":"#FFFFFF","clusterBkg":"#1F2937","clusterBorder":"#94A3B8","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .edgeLabel { color: #FFFFFF !important; background-color: transparent !important; }"}}%%
+flowchart LR
+    subgraph Config
+        K1["local_embedding_model = intfloat/multilingual-e5-large"]
+        K2["embedding_dimensions = 1024 (384|768|1024 only)"]
+        K3["local_embedding_device = cpu"]
+        K4["local_embedding_batch_size = 16 (1..64)"]
+        K5["local_embedding_path / revision"]
+        K6["embedding_position_limit = 512"]
+    end
+
+    subgraph Loader["_load_embedding_model (process cache + lock)"]
+        L1["SentenceTransformer(<br/>local_files_only=True,<br/>trust_remote_code=False)"]
+        L2["model.max_seq_length = 512"]
+    end
+
+    IN["chunk.embedding_text[]"] --> P["_ensure_passage_prefix<br/>regex strips repeats,<br/>adds exactly one 'passage: '"]
+    P --> B["batch loop<br/>step = batch_size"]
+    B --> E["model.encode(<br/>normalize_embeddings=True,<br/>convert_to_numpy=True)<br/>under _INFERENCE_LOCK"]
+    E --> V{"len(vector) == embedding_dimensions?"}
+    V -->|no| ERR["ValueError:<br/>passage and query vectors must<br/>come from the same model"]
+    V -->|yes| OUT["float vectors -> Chroma upsert"]
+
+    Config --> Loader --> E
+
+    Q["'query: ' prefix"] -.->|"owned by RAG service, NOT here"| X["not implemented in this repo"]
+
+    classDef config fill:#2563EB,stroke:#2563EB,color:#FFFFFF,stroke-width:1.5px;
+    classDef process fill:#7C3AED,stroke:#7C3AED,color:#FFFFFF,stroke-width:2px;
+    classDef decision fill:#B45309,stroke:#D97706,color:#FFFFFF,stroke-width:2px;
+    classDef success fill:#059669,stroke:#059669,color:#FFFFFF,stroke-width:2px;
+    classDef failure fill:#DC2626,stroke:#DC2626,color:#FFFFFF,stroke-width:2px;
+    classDef external fill:#C2410C,stroke:#EA580C,color:#FFFFFF,stroke-width:2px;
+    class K1,K2,K3,K4,K5,K6,L1,L2 config;
+    class IN,P,B,E process;
+    class V decision;
+    class OUT success;
+    class ERR failure;
+    class Q,X external;
+```
+
+**Presentation takeaway:** ingestion and retrieval share an explicit embedding contract, while runtime loading remains deterministic and offline.
+
+## 6. Atlassian — Confluence flow
+
+This sequence shows Confluence content moving through the backend-owned Atlassian proxy. Ingestion never handles Atlassian refresh tokens directly; it sends an allowlisted target to the control plane, and the backend performs the authenticated call against the configured cloud tenant.
+
+Pages are paginated, optionally restricted to configured root-page trees, and normalized from storage HTML or Atlas Document Format. Attachments are emitted as separate versioned source documents and remain subject to the downstream size and security gates.
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryTextColor":"#FFFFFF","lineColor":"#E2E8F0","actorBkg":"#2563EB","actorBorder":"#2563EB","actorTextColor":"#FFFFFF","actorLineColor":"#2563EB","signalColor":"#E2E8F0","signalTextColor":"#FFFFFF","labelBoxBkgColor":"#7C3AED","labelBoxBorderColor":"#7C3AED","labelTextColor":"#FFFFFF","loopTextColor":"#FFFFFF","noteBkgColor":"#B45309","noteBorderColor":"#D97706","noteTextColor":"#FFFFFF","activationBkgColor":"#059669","activationBorderColor":"#059669","sequenceNumberColor":"#FFFFFF","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .messageText, .loopText, .labelText { fill: #FFFFFF !important; }"}}%%
+sequenceDiagram
+    autonumber
+    participant SVC as IngestionService
+    participant AC as AtlassianSourceClient
+    participant CP as BackendControlPlaneClient
+    participant BE as Backend /atlassian proxy
+    participant CF as api.atlassian.com/ex/confluence/{cloudId}
+
+    SVC->>AC: confluence_documents(mapping, updated_since)
+    loop until _links.next is absent
+        AC->>CP: atlassian_get(target=/wiki/api/v2/pages,<br/>space-id, status=current,<br/>body-format=storage, limit=source_page_size(100))
+        CP->>BE: GET /v1/internal/ingestion/projects/{id}/atlassian<br/>Authorization: Bearer CONTROL_PLANE_API_KEY
+        BE->>CF: authenticated request (backend owns the token)
+        CF-->>BE: pages[] + _links.next
+        BE-->>CP: passthrough JSON
+        CP-->>AC: httpx.Response (3 retries, backoff 2^n on 5xx/transport)
+        opt storage body empty (live doc)
+            AC->>CP: same page, body-format=atlas_doc_format
+            CP-->>AC: ADF payload
+            AC->>AC: _atlas_doc_text() -> Markdown,<br/>tables rendered pipe-delimited
+        end
+        opt mapping.root_page_ids present
+            AC->>AC: walk parent chain; drop pages outside the tree
+        end
+        AC-->>SVC: SourceDocument(source_type=PAGE)
+        AC->>CP: target=/wiki/api/v2/pages/{pageId}/attachments
+        AC->>CP: target = downloadLink (absolute-resolved)
+        AC-->>SVC: SourceDocument(source_type=ATTACHMENT)<br/>capped at max_attachment_bytes = 25 MB
+    end
+```
+
+**Presentation takeaway:** the backend remains the credential boundary while ingestion owns pagination, normalization, scope filtering, and attachment discovery.
+
+## 7. Atlassian — Jira flow
+
+This sequence describes incremental Jira discovery. The client builds scope-bound JQL with a five-minute overlap, requests a stable ascending order, and follows Jira’s token-based pagination rather than offset pagination.
+
+Each issue becomes a structured source containing summary, description, and comments. Supported attachments become independent source documents so they can be scanned, versioned, chunked, indexed, retried, or quarantined without rewriting the parent issue unnecessarily.
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryTextColor":"#FFFFFF","lineColor":"#E2E8F0","actorBkg":"#2563EB","actorBorder":"#2563EB","actorTextColor":"#FFFFFF","actorLineColor":"#2563EB","signalColor":"#E2E8F0","signalTextColor":"#FFFFFF","labelBoxBkgColor":"#7C3AED","labelBoxBorderColor":"#7C3AED","labelTextColor":"#FFFFFF","loopTextColor":"#FFFFFF","noteBkgColor":"#B45309","noteBorderColor":"#D97706","noteTextColor":"#FFFFFF","activationBkgColor":"#059669","activationBorderColor":"#059669","sequenceNumberColor":"#FFFFFF","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .messageText, .loopText, .labelText { fill: #FFFFFF !important; }"}}%%
+sequenceDiagram
+    autonumber
+    participant SVC as IngestionService
+    participant AC as AtlassianSourceClient
+    participant BE as Backend /atlassian proxy
+    participant JR as api.atlassian.com/ex/jira/{cloudId}
+
+    SVC->>AC: jira_documents(mapping, updated_since)
+    AC->>AC: build JQL<br/>project = "KEY"<br/>[+ updated >= "YYYY-MM-DD HH:MM" (cursor - 5 min)]<br/>ORDER BY updated ASC, key ASC
+    loop while nextPageToken
+        AC->>BE: target=/rest/api/3/search/jql<br/>maxResults=source_page_size(100)<br/>fields=summary,description,issuetype,status,priority,<br/>assignee,reporter,created,updated,resolutiondate,<br/>duedate,labels,components,parent,comment,attachment
+        BE->>JR: authenticated request
+        JR-->>BE: issues[] + nextPageToken
+        BE-->>AC: passthrough JSON
+        AC->>AC: _jira_issue() -> source_id "issue:{id|key}"<br/>body: ## Issue summary / ## Description / ## Comments
+        AC-->>SVC: SourceDocument(source_type=ISSUE)
+        loop fields.attachment[]
+            AC->>BE: target = attachment.content
+            AC-->>SVC: SourceDocument(source_type=ATTACHMENT)
         end
     end
-    I->>C: Delete records for confirmed missing paths
-    I->>S: Mark missing manifests deleted and save cursor
+    Note over AC,JR: pagination is token-based (nextPageToken),<br/>not startAt offsets
 ```
 
-Repository, branch, include/exclude patterns, and path limits come from the backend mapping. Blob
-SHA is the primary version. Unchanged blobs are not downloaded, chunked, embedded, or rewritten.
+**Presentation takeaway:** overlap plus stable token pagination favors completeness at cursor boundaries, while manifest checks remove duplicate processing.
 
-The webhook endpoint verifies `X-Hub-Signature-256`, accepts only supported merged-PR events, and
-uses the backend to resolve a repository to a project. Webhooks accelerate freshness; scheduled
-reconciliation remains the correctness path.
+## 8. GitHub authentication and discovery
 
-### Jira
+This sequence presents the GitHub App trust flow and the two discovery modes. The client signs a short-lived JWT, resolves the repository installation, exchanges it for an installation token, and caches that token only within its safe validity window.
 
-Jira data is requested through the backend Atlassian gateway:
-
-1. ingestion receives the mapped Jira project key and cloud metadata;
-2. JQL always includes the configured project key;
-3. incremental JQL adds an update-time cursor with overlap;
-4. issues are paginated in stable order;
-5. issue fields, comments, and supported attachments become source documents;
-6. update time and content hash prevent duplicate work;
-7. the cursor advances only after the entire scope succeeds.
-
-Incremental results cannot prove deletion, so Jira deletion reconciliation runs only during a
-successful full scan.
-
-### Confluence
-
-Confluence is also read through the backend gateway:
-
-1. ingestion enumerates pages in the mapped space;
-2. optional root page IDs restrict the accepted page trees;
-3. storage-format HTML is normalized while preserving headings, lists, and tables;
-4. supported attachments become separate versioned sources;
-5. page/attachment versions and hashes drive incremental work;
-6. a successful full scan may reconcile deletions.
-
-OAuth scopes never override Atlassian permissions. The integration account must itself be able to
-read the selected project and space.
-
-## 8. Parsing and chunking routes
-
-| Content type | Processing strategy |
-|---|---|
-| PDF, scanned PDF, DOCX, PPTX, XLSX | Local Docling analysis and HybridChunker when worker dependencies are present |
-| HTML / Confluence | Heading-aware sections preserving lists, tables, and hierarchy |
-| Markdown | Header splitting, then bounded token windows for oversized sections |
-| Source code | Language-aware boundaries plus repository/path/symbol metadata |
-| CSV and tables | Row-aware chunks with repeated headers |
-| Logs and configuration | Line-aware bounded chunks |
-| Jira issues | Structured issue context, description, comments, and attachments |
-| Plain text | Sentence/section token fallback |
-
-The chunker preserves evidence text exactly enough for citation while adding contextual information
-to `embedding_text`. This separation improves search without silently changing what the answer cites.
-
-## 9. Binary-document and quarantine boundary
-
-The heavier worker image isolates Docling, OCR-related dependencies, ClamAV requirements, and local
-model artifacts from the lightweight HTTP image. Conversion has explicit file-size, page-count,
-concurrency, memory, and timeout limits.
-
-The pipeline rejects or quarantines unsupported archives, executables, macro-enabled Office files,
-signature/MIME mismatches, encrypted PDFs, oversized inputs, detected secrets, malware, and policy
-violations before vector creation.
-
-Queue messages, quarantine records, and logs contain identifiers and reason codes, never document
-bodies or secrets.
-
-## 10. Stable identity and idempotency
-
-Every provider document receives a stable source ID. Every chunk receives a canonical ID based on
-source identity, ordinal, structure/content information, and component versions. Chroma storage IDs
-are deterministic hashes of project, provider, source, and ordinal.
-
-This design means:
-
-- retrying the same successful source converges on the same records;
-- changing one source replaces only that source;
-- a smaller new generation removes stale old chunks;
-- project/provider/source filters prevent cross-source deletion;
-- a failed write cannot be mistaken for a committed version.
-
-## 11. Chroma architecture
-
-The backend mapping supplies a logical collection name. Code derives a physical collection per
-project:
-
-```text
-<normalized-logical-name>-<normalized-project-id>-<12-character SHA-256 prefix>
-```
-
-Collection metadata must contain the exact project ID, logical collection name, and cosine distance
-setting. Both ingestion and RAG validate this identity. This replaced the older design that relied
-on a shared collection plus a namespace string.
-
-Every source write and delete is additionally constrained by:
-
-- `project_id`;
-- `access_policy_id=project:<projectId>`;
-- provider;
-- stable source ID.
-
-### Required record contract
-
-Every normal chunk includes:
-
-- canonical chunk ID and storage ID;
-- `project_id` and `access_policy_id`;
-- provider, source type, source ID, parent ID, and source version;
-- title, reference, URL, locator, and chunk ordinal;
-- evidence text and contextual embedding text;
-- content hash, structure hash, and structure path;
-- language, MIME type, and security classification;
-- parser/chunker/schema/embedding versions;
-- repository, branch, path, symbol, issue, table, and visual fields when applicable.
-
-Reserved security/identity fields cannot be overridden by provider metadata.
-
-### Project vocabulary record
-
-After a successful scope, ingestion scans authorized record metadata and writes one reserved project
-vocabulary record. It contains observed entities, document categories, providers, source types,
-code extensions, and languages. RAG uses it for bounded query understanding; it is not user content
-and is excluded from normal evidence.
-
-## 12. Local embedding
-
-Ingestion creates passage embeddings locally with `intfloat/multilingual-e5-large`. RAG uses the
-same model family for query embeddings. The mapped `embeddingModel` and `schemaVersion` are written
-on every record and manifest; a mismatch forces reprocessing or causes RAG to reject the record.
-
-Embedding happens only for new, changed, forced, or component-version-invalidated content.
-
-## 13. Azure Table operational state
-
-Azure Table is a key/value NoSQL service, not Azure SQL. It stores operational state only.
+Full scans enumerate a complete branch tree and reject truncated responses. Merged-PR runs inspect only changed paths. Both modes enforce size, include/exclude, sensitive-path, and extension controls before downloading content; Markdown image references are limited to safe repository-relative assets.
 
 ```mermaid
-flowchart TB
-    PK["Partition key\nhash(project + provider + scope)"] --> MF["Source manifest rows\nhashed stable source IDs"]
-    PK --> CU["Cursor row\n__cursor__"]
-    PK --> LE["Scope lease\nowner + expiry"]
-    PK --> QU["Quarantine records\nsource + safe reason"]
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryTextColor":"#FFFFFF","lineColor":"#E2E8F0","actorBkg":"#2563EB","actorBorder":"#2563EB","actorTextColor":"#FFFFFF","actorLineColor":"#2563EB","signalColor":"#E2E8F0","signalTextColor":"#FFFFFF","labelBoxBkgColor":"#7C3AED","labelBoxBorderColor":"#7C3AED","labelTextColor":"#FFFFFF","loopTextColor":"#FFFFFF","noteBkgColor":"#B45309","noteBorderColor":"#D97706","noteTextColor":"#FFFFFF","activationBkgColor":"#059669","activationBorderColor":"#059669","sequenceNumberColor":"#FFFFFF","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .messageText, .loopText, .labelText { fill: #FFFFFF !important; }"}}%%
+sequenceDiagram
+    autonumber
+    participant SVC as GitHubSourceClient
+    participant GH as api.github.com
+
+    SVC->>SVC: sign RS256 JWT<br/>iat = now-30s, exp = now+9min, iss = github_app_id<br/>(key from github_private_key_base64)
+    SVC->>GH: GET /repos/{owner}/{repo}/installation (Bearer JWT)
+    GH-->>SVC: installation_id
+    SVC->>GH: POST /app/installations/{id}/access_tokens
+    GH-->>SVC: installation token (cached ~50 min)
+
+    alt full scan
+        SVC->>GH: GET /repos/{o}/{r}/branches/{branch} -> head sha
+        SVC->>GH: GET /repos/{o}/{r}/git/trees/{sha}?recursive=1
+        GH-->>SVC: tree (error raised if truncated)
+    else merged-PR incremental
+        SVC->>GH: GET /repos/{o}/{r}/pulls/{n}/files?per_page=100&page=N
+        GH-->>SVC: added | modified | removed | renamed + previous_path
+    end
+
+    SVC->>SVC: filter: size <= github_max_file_bytes (1 MB)<br/>includePaths / excludePaths globs<br/>block .env* .pem .key .p12 .pfx<br/>block node_modules vendor .gradle build dist secrets
+    alt .pdf .docx .pptx .xlsx
+        SVC->>GH: blob API (base64 binary)
+    else text
+        SVC->>GH: GET /repos/.../contents/{path}?ref={commitSha}
+    end
+    opt .md files
+        SVC->>SVC: resolve_markdown_asset_paths()<br/>repo-relative only; external URLs -> UNSAFE_MARKDOWN_IMAGE_REFERENCE
+    end
 ```
 
-Manifest fields include source identity/version, normalized content hash, chunk count, scan ID,
-deletion state, timestamps, and parser/chunker/embedding/schema versions. Source bodies and vectors
-are not stored in Azure Table.
+**Presentation takeaway:** GitHub access is repository-scoped and short-lived, while discovery is optimized for freshness without weakening full-scan correctness.
 
-Lost manifest state can be rebuilt from providers with a controlled full ingestion. Chroma should
-be rebuilt into a separate logical route when schema or embedding compatibility changes.
+## 9. Webhook admission path
 
-## 14. Incremental, full, and deletion behavior
+This decision path shows every gate applied before a GitHub webhook can trigger ingestion. The API limits request size, validates the SHA-256 HMAC in constant time, accepts only merged pull-request events, resolves the repository through the control plane, and confirms the target branch and project setting.
 
-### Incremental run
-
-- downloads/processes only changed sources;
-- touches unchanged manifests;
-- uses Jira/Confluence cursor overlap to avoid boundary misses;
-- performs GitHub missing-path reconciliation after a complete tree scan;
-- does not infer Jira/Confluence deletion from partial update results.
-
-### Full run
-
-- enumerates the complete configured scope;
-- forces analysis/chunking/writing when requested;
-- reconciles confirmed deletions only after the scope succeeds;
-- is required for a staging collection/schema override.
-
-### Failure rule
-
-If any source exceeds the configured failure budget or a provider scope is incomplete, its cursor
-does not advance and deletion reconciliation is skipped. Absence in a failed response is never
-treated as deletion.
-
-## 15. Authentication and credentials
-
-These identities must remain separate:
-
-| Identity | Purpose | Storage/use |
-|---|---|---|
-| Entra end user | Mobile login and answer authorization | Backend only |
-| Ingestion workload | Backend internal API and Azure Table | Local key now; managed identity target |
-| GitHub App | Mapped repository reads and webhook delivery | Ingestion secret configuration |
-| Atlassian integration account | Mapped Jira/Confluence reads | Refresh token held by backend secret store |
-| Chroma writer | Vector upsert/delete | Ingestion only |
-
-Ingestion never uses an end-user token as a workload credential. It never stores Atlassian access or
-refresh tokens. Production Azure Table access uses `DefaultAzureCredential` and least-privilege data
-permissions rather than an account key or SAS.
-
-## 16. Queue and worker architecture
-
-Production can place identifier-only jobs on Azure Service Bus. A message contains enough identity
-to re-resolve the project/source, not document content or credentials. The worker:
-
-1. receives the identifier;
-2. reloads current configuration from the backend;
-3. fetches source content with its workload/provider credential;
-4. runs the same security, parsing, chunking, vector, and manifest workflow;
-5. retries transient failures with bounded delivery counts;
-6. dead-letters permanent failures using safe metadata only.
-
-Local CLI operation may run the workflow directly without the queue.
-
-## 17. Failure and retry behavior
-
-| Failure | Behavior |
-|---|---|
-| Missing/inactive project mapping | Stop before provider reads or vector writes |
-| Invalid internal credential | Backend rejects request |
-| Provider `429` or transient `5xx` | Bounded retry/backoff; cursor remains unchanged on failure |
-| Permanent auth/validation failure | No blind retry |
-| Quarantined document | Safe reason recorded; no chunks or vectors |
-| Parser timeout/failure | Source not committed; retryable according to policy |
-| Embedding/vector failure | Manifest and cursor not advanced |
-| Partial scope failure | No deletion reconciliation and no cursor advance |
-| Lease already held | Reject concurrent conflicting run |
-
-Retries are idempotent because record identities and write order are deterministic.
-
-## 18. Logging and observability
-
-Allowed operational information includes project/provider/source identifiers, scan/job IDs, counts,
-durations, component versions, outcome, and safe reason codes.
-
-Logs, metrics, traces, queues, and manifests must not contain OAuth/access tokens, GitHub private
-keys, webhook secrets, backend service keys, document bodies, embeddings, or user chat content.
-
-Useful counters include discovered, indexed, unchanged, deleted, failed, chunks written, visual
-eligibility/failures, provider latency, quarantine reasons, retry counts, and cursor freshness.
-
-## 19. Code architecture
+When Service Bus is configured, the endpoint queues an identifier-only job and returns immediately. The synchronous path is retained for environments without the queue, but it follows the same project and branch admission rules.
 
 ```mermaid
-flowchart TB
-    API["app/api/* + app/main.py\nHTTP and webhook boundary"] --> SVC["app/service.py\nproject/provider orchestration"]
-    CLI["scripts/run_ingestion.py"] --> SVC
-    SVC --> CP["control_plane.py\nbackend client"]
-    SVC --> GH["github.py\nGitHub App client"]
-    SVC --> AT["atlassian.py\nbackend provider gateway client"]
-    SVC --> WF["workflow.py\nper-document LangGraph"]
-    WF --> SEC["content_security.py"]
-    WF --> CH["structured_chunking.py + parsing.py"]
-    WF --> VS["vector.py\nChroma writer"]
-    WF --> ST["state.py\nAzure Table manifests"]
-    VS --> EMB["embedding.py\nlocal passage embedder"]
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryColor":"#2563EB","primaryTextColor":"#FFFFFF","primaryBorderColor":"#2563EB","lineColor":"#E2E8F0","edgeLabelBackground":"transparent","secondaryColor":"#7C3AED","secondaryTextColor":"#FFFFFF","tertiaryColor":"#059669","tertiaryTextColor":"#FFFFFF","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .edgeLabel { color: #FFFFFF !important; background-color: transparent !important; }"}}%%
+flowchart TD
+    W["POST /v1/webhooks/github"] --> S1{"body <= 2 MB?"}
+    S1 -->|no| E413["413"]
+    S1 --> S2{"X-Hub-Signature-256 ==<br/>sha256 HMAC(secret, body)?<br/>compare_digest"}
+    S2 -->|no| E401["401"]
+    S2 --> S3{"X-GitHub-Event == pull_request?"}
+    S3 -->|no| IGN["accepted=false, reason"]
+    S3 --> S4{"action == closed AND merged == true?"}
+    S4 -->|no| IGN
+    S4 --> S5["control plane<br/>GET /v1/internal/ingestion/github-project?owner&repository"]
+    S5 -->|404| IGN
+    S5 --> S6{"branch in indexedBranches<br/>AND githubMergedPrEnabled?"}
+    S6 -->|no| IGN
+    S6 --> S7{"service_bus_namespace configured?"}
+    S7 -->|yes| ENQ["enqueue IngestionJob<br/>message_id = X-GitHub-Delivery<br/>correlation_id = uuid<br/>return 200 immediately"]
+    S7 -->|no| SYNC["process changed files inline<br/>return counts"]
+
+    classDef entry fill:#2563EB,stroke:#2563EB,color:#FFFFFF,stroke-width:2px;
+    classDef decision fill:#B45309,stroke:#D97706,color:#FFFFFF,stroke-width:2px;
+    classDef process fill:#7C3AED,stroke:#7C3AED,color:#FFFFFF,stroke-width:2px;
+    classDef success fill:#059669,stroke:#059669,color:#FFFFFF,stroke-width:2px;
+    classDef rejected fill:#DC2626,stroke:#DC2626,color:#FFFFFF,stroke-width:2px;
+    class W entry;
+    class S1,S2,S3,S4,S6,S7 decision;
+    class S5 process;
+    class ENQ,SYNC success;
+    class E413,E401,IGN rejected;
 ```
 
-Important modules:
+**Presentation takeaway:** untrusted webhook traffic cannot select an arbitrary project, repository, branch, event type, or ingestion route.
 
-- `app/config.py`: environment contract, safety limits, component versions.
-- `app/projects.py`: typed backend mapping and vector-route conversion.
-- `app/control_plane.py`: authenticated backend internal client.
-- `app/service.py`: project/provider orchestration, scans, reconciliation, leases, cursors.
-- `app/github.py`: GitHub App JWT/installation-token and repository access.
-- `app/atlassian.py`: Jira/Confluence reads through the backend gateway.
-- `app/content_security.py`: rejection, sensitive classification, and quarantine rules.
-- `app/format_analysis.py`, `app/parsing.py`, `app/structured_chunking.py`: structure-preserving
-  analysis and chunk construction.
-- `app/workflow.py`: bounded per-document transaction graph.
-- `app/embedding.py`: local passage embeddings.
-- `app/chroma_collections.py`: deterministic project collection identity.
-- `app/vector.py`: generation-safe Chroma writes/deletes and vocabulary refresh.
-- `app/state.py`: Azure Table manifests, cursors, leases, and quarantine state.
-- `app/api/github.py`: webhook signature and event boundary.
-- `app/jobs.py`: identifier-only queue jobs.
+## 10. Asynchronous job lifecycle
 
-## 20. Deployment topology
+This sequence follows an identifier-only ingestion job from webhook admission through completion, retry, or dead-lettering. Queue messages carry project and source identity plus tracing identifiers, but never document bodies, provider credentials, or application secrets.
 
-### Current local development
+At startup the worker verifies pinned model checksums. Each message reloads current project configuration through `IngestionService`; successful work is completed, transient failures are abandoned for redelivery, and the fifth failed delivery is dead-lettered with a safe reason and error type.
 
-- ingestion is normally launched from the CLI/unattended script;
-- backend supplies mappings and proxies Atlassian;
-- local Chroma stores the project-isolated corpus;
-- local E5 creates embeddings;
-- Azure Table remains the operational manifest store when configured;
-- the heavyweight worker dependencies are used only for formats that need them.
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryTextColor":"#FFFFFF","lineColor":"#E2E8F0","actorBkg":"#2563EB","actorBorder":"#2563EB","actorTextColor":"#FFFFFF","actorLineColor":"#2563EB","signalColor":"#E2E8F0","signalTextColor":"#FFFFFF","labelBoxBkgColor":"#7C3AED","labelBoxBorderColor":"#7C3AED","labelTextColor":"#FFFFFF","loopTextColor":"#FFFFFF","noteBkgColor":"#B45309","noteBorderColor":"#D97706","noteTextColor":"#FFFFFF","activationBkgColor":"#059669","activationBorderColor":"#059669","sequenceNumberColor":"#FFFFFF","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .messageText, .loopText, .labelText { fill: #FFFFFF !important; }"}}%%
+sequenceDiagram
+    participant API as Webhook handler
+    participant SB as Service Bus queue
+    participant W as scripts/run_worker.py
+    participant SVC as IngestionService
 
-### Production target
+    API->>SB: ServiceBusMessage(IngestionJob.to_json())<br/>{projectId, provider, sourceId, sourceVersion,<br/>trigger, deliveryId, correlationId}<br/>no secrets, no bodies
+    Note over W: startup: verify pinned model checksums
+    W->>SB: receiver(max_wait_time=30,<br/>prefetch=docling_max_concurrency=2)
+    SB-->>W: message
+    W->>SVC: ingest_project(projectId, (provider,), full=False)
+    alt success
+        W->>SB: complete_message()
+    else failure and delivery_count < 5
+        W->>SB: abandon_message() (redelivery)
+    else failure and delivery_count >= 5
+        W->>SB: dead_letter_message(reason=INGESTION_FAILED,<br/>description=type(error).__name__)
+    end
+```
 
-- Container Apps Job or durable scheduler for incremental runs;
-- private backend, Chroma, Azure Table, and queue networking;
-- ingestion workload identity for backend app role and Azure Table;
-- GitHub App and webhook secrets from a managed secret provider;
-- identifier-only Service Bus messages and isolated binary workers;
-- separate Chroma writer/read credentials;
-- immutable model/parser artifacts, resource limits, dead-letter handling, and content-free telemetry.
+**Presentation takeaway:** asynchronous delivery provides bounded retries and operational isolation without putting sensitive content into the messaging layer.
 
-## 21. Non-negotiable invariants
+## 11. Vector writes and Chroma layout
 
-1. The backend is the only project-mapping and Atlassian-credential authority.
-2. Ingestion never authenticates end users or grants project access.
-3. Ingestion never connects directly to backend SQL.
-4. Every Chroma operation is project, policy, provider, and source scoped.
-5. Chroma succeeds before a manifest or cursor is committed.
-6. Partial provider results never prove deletion.
-7. Source bodies and secrets never enter queues, manifests, logs, or traces.
-8. Security inspection occurs before embedding and vector writing.
-9. Component-version changes are explicit and trigger compatible reprocessing.
-10. RAG is read-only; ingestion is the only corpus writer.
+This diagram defines the generation-safe vector transaction and the physical collection contract. Before writing, ingestion reads all prior storage IDs for the exact project, access policy, provider, and source. It then embeds and upserts the complete new generation, verifies every expected ID, and only afterward deletes obsolete IDs.
+
+Project-specific collection identity and required record metadata enforce isolation and traceability. The reserved vocabulary record summarizes observed corpus metadata for bounded query understanding and is excluded from ordinary evidence retrieval.
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryColor":"#7C3AED","primaryTextColor":"#FFFFFF","primaryBorderColor":"#7C3AED","lineColor":"#E2E8F0","edgeLabelBackground":"transparent","secondaryColor":"#2563EB","secondaryTextColor":"#FFFFFF","tertiaryColor":"#059669","tertiaryTextColor":"#FFFFFF","clusterBkg":"#1F2937","clusterBorder":"#94A3B8","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .edgeLabel { color: #FFFFFF !important; background-color: transparent !important; }"}}%%
+flowchart TD
+    CH["SourceChunk[]"] --> Q1["collection.get(where = $and[<br/>project_id, access_policy_id,<br/>provider, source_id])<br/>-> prior_ids"]
+    Q1 --> EM["embed_passages(embedding_text[])"]
+    EM --> IDS["storage_id = sha256(<br/>project|provider|source_id|ordinal)"]
+    IDS --> UP["collection.upsert(ids, embeddings,<br/>documents=chunk.content, metadatas)"]
+    UP --> VF["collection.get(ids=storage_ids, include=[])<br/>verify written"]
+    VF --> DEL["collection.delete(prior_ids − storage_ids)"]
+    DEL --> OK["commit node may now write manifest"]
+
+    UP -.->|"transient: ConnectionError/Timeout/OSError<br/>or 408,429,500,502,503,504"| RT["_with_retry: 3 attempts,<br/>sleep 0.25 * 2^n"]
+
+    subgraph Collection["collection = base[:48]-project[:32]-sha256(projectId)[:12]"]
+        M1["metadata: hnsw:space=cosine,<br/>project_id, logical_collection"]
+        M2["per-record: canonical_chunk_id, project_id,<br/>access_policy_id=project:{id}, provider,<br/>source_id, source_type, source_version,<br/>title, reference, source_url, chunk_ordinal,<br/>content_hash, structure_hash,<br/>structure_path/root/leaf, locator, language,<br/>visual_* , page_number, mime_type,<br/>security_classification, schema_version,<br/>embedding_model, embedding_text"]
+        M3["reserved __vocabulary__ record<br/>provider=INGESTION, source_type=SYSTEM<br/>entities, doc_categories, providers,<br/>source_types, code_extensions, languages"]
+    end
+
+    OK --> M3
+
+    classDef source fill:#2563EB,stroke:#2563EB,color:#FFFFFF,stroke-width:2px;
+    classDef process fill:#7C3AED,stroke:#7C3AED,color:#FFFFFF,stroke-width:2px;
+    classDef verify fill:#B45309,stroke:#D97706,color:#FFFFFF,stroke-width:2px;
+    classDef success fill:#059669,stroke:#059669,color:#FFFFFF,stroke-width:2px;
+    classDef retry fill:#DC2626,stroke:#DC2626,color:#FFFFFF,stroke-width:2px;
+    classDef metadata fill:#0F766E,stroke:#0F766E,color:#FFFFFF,stroke-width:1.5px;
+    class CH source;
+    class Q1,EM,IDS,UP,DEL process;
+    class VF verify;
+    class OK success;
+    class RT retry;
+    class M1,M2,M3 metadata;
+```
+
+**Presentation takeaway:** a new source generation becomes authoritative only after the complete vector set is written and verified.
+
+## 12. Azure Table state model
+
+This entity model describes the operational records stored for each project/provider scope. The partition key hashes the scope identity, while fixed row keys identify the cursor and lease. Source manifests and quarantine records use hashed source identities so the table can scale without storing content bodies.
+
+Manifests are compatibility fences as well as progress records: they retain source version and content hash alongside parser, chunker, embedding, and schema versions. The cursor advances only after a clean scope, and an expired lease can be taken over safely using entity tags.
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryColor":"#2563EB","primaryTextColor":"#FFFFFF","primaryBorderColor":"#2563EB","lineColor":"#E2E8F0","mainBkg":"#1D4ED8","nodeBorder":"#2563EB","secondaryColor":"#059669","secondaryTextColor":"#FFFFFF","tertiaryColor":"#B45309","tertiaryTextColor":"#FFFFFF","attributeBackgroundColorOdd":"#1E3A8A","attributeBackgroundColorEven":"#312E81","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .entityBox, .attributeBoxOdd, .attributeBoxEven { stroke: #2563EB !important; } .entityLabel, .attributeBoxOdd text, .attributeBoxEven text, .relationshipLabel { fill: #FFFFFF !important; color: #FFFFFF !important; }"}}%%
+erDiagram
+    PARTITION ||--o{ MANIFEST : contains
+    PARTITION ||--|| CURSOR : has
+    PARTITION ||--o| LEASE : has
+    PARTITION ||--o{ QUARANTINE : has
+
+    PARTITION {
+        string PartitionKey "sha256(projectId|PROVIDER|scope)"
+    }
+
+    CURSOR {
+        string RowKey "__cursor__"
+        string cursor "ISO8601; advances only on clean scope"
+    }
+
+    LEASE {
+        string RowKey "__lease__"
+        string owner
+        string expires_at "now + scope_lease_seconds(900); etag takeover on expiry"
+    }
+
+    QUARANTINE {
+        string RowKey "__quarantine__{sourceHash}"
+        string reason_code "BLOCKED_FILE_TYPE|FILE_TOO_LARGE|MALWARE_DETECTED|..."
+        string source_id
+        string scan_id
+        string recorded_at
+    }
+
+    MANIFEST {
+        string RowKey "sha256(source_id)"
+        string version
+        string content_hash
+        int chunk_count
+        string last_seen_run "scan_id"
+        bool deleted
+        string parser_version
+        string chunker_version
+        string embedding_profile
+        string schema_version
+    }
+```
+
+**Presentation takeaway:** Azure Table stores coordination and compatibility state—not source bodies, embeddings, or credentials.
+
+## 13. Security gate ordering
+
+This diagram presents the ordered security boundary applied before parsing, chunking, embedding, or vector creation. Cheap deterministic checks run first: blocked extensions, size limits, magic bytes, archive structure, macro presence, encryption, and executable signatures.
+
+Optional ClamAV scanning and bounded secret detection then classify accepted content. Credential-sensitive documents are not silently discarded; they are explicitly marked with the project-authorized sensitive classification so retrieval policy can treat them appropriately.
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryColor":"#B45309","primaryTextColor":"#FFFFFF","primaryBorderColor":"#D97706","lineColor":"#E2E8F0","edgeLabelBackground":"transparent","secondaryColor":"#7C3AED","secondaryTextColor":"#FFFFFF","tertiaryColor":"#059669","tertiaryTextColor":"#FFFFFF","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .edgeLabel { color: #FFFFFF !important; background-color: transparent !important; }"}}%%
+flowchart TD
+    IN["document bytes / text"] --> S1{"extension in blocklist?<br/>.exe .dll .zip .jar .rar .docm .xlsm"}
+    S1 -->|yes| QT["QuarantinedDocument<br/>BLOCKED_FILE_TYPE"]
+    S1 --> S2{"size <= max_attachment_bytes (25 MB)?"}
+    S2 -->|no| QT2["FILE_TOO_LARGE"]
+    S2 --> S3["magic-byte / structure validation<br/>%PDF-, PK zip dir,<br/>block vbaproject.bin macros,<br/>block /Encrypt PDFs,<br/>block MZ and 0x7fELF"]
+    S3 --> S4{"enable_malware_scan?"}
+    S4 -->|yes| S5["ClamAV zINSTREAM over clamav_socket<br/>64 KB frames -> FOUND = MALWARE_DETECTED"]
+    S4 -->|no| S6
+    S5 --> S6["secret detection on first 2 MB:<br/>BEGIN PRIVATE KEY, gh[opsu]_*, AKIA*,<br/>api_key/client_secret/password assignments,<br/>Shannon entropy >= 4.7 with a digit"]
+    S6 --> S7["local visuals: size cap +<br/>PNG/JPEG/WEBP magic + ClamAV"]
+    S7 --> OUT{"credential_sensitive?"}
+    OUT -->|yes| MARK["metadata.credential_sensitive = true<br/>security_classification =<br/>PROJECT_AUTHORIZED_SENSITIVE"]
+    OUT -->|no| PASS["proceed to split"]
+    MARK --> PASS
+
+    classDef entry fill:#2563EB,stroke:#2563EB,color:#FFFFFF,stroke-width:2px;
+    classDef decision fill:#B45309,stroke:#D97706,color:#FFFFFF,stroke-width:2px;
+    classDef inspect fill:#7C3AED,stroke:#7C3AED,color:#FFFFFF,stroke-width:2px;
+    classDef rejected fill:#DC2626,stroke:#DC2626,color:#FFFFFF,stroke-width:2px;
+    classDef sensitive fill:#C2410C,stroke:#EA580C,color:#FFFFFF,stroke-width:2px;
+    classDef success fill:#059669,stroke:#059669,color:#FFFFFF,stroke-width:2px;
+    class IN entry;
+    class S1,S2,S4,OUT decision;
+    class S3,S5,S6,S7 inspect;
+    class QT,QT2 rejected;
+    class MARK sensitive;
+    class PASS success;
+```
+
+**Presentation takeaway:** unsafe content stops before vectorization, while accepted sensitive content remains visibly classified and project-scoped.
+
+## 14. Version fences that force reprocessing
+
+This final diagram explains the six compatibility checks that determine whether an existing source can be skipped. Two checks describe the source itself—provider version and normalized content hash—while four describe the processing contract: parser, chunker, schema, and embedding model.
+
+All six values must match the stored manifest. Any difference triggers complete re-analysis, re-chunking, re-embedding, and upsert so the corpus never mixes incompatible processing generations under one committed manifest.
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"darkMode":true,"background":"transparent","textColor":"#FFFFFF","primaryColor":"#2563EB","primaryTextColor":"#FFFFFF","primaryBorderColor":"#2563EB","lineColor":"#E2E8F0","edgeLabelBackground":"transparent","secondaryColor":"#7C3AED","secondaryTextColor":"#FFFFFF","tertiaryColor":"#059669","tertiaryTextColor":"#FFFFFF","clusterBkg":"#1F2937","clusterBorder":"#94A3B8","fontFamily":"Inter, Arial, sans-serif"},"themeCSS":"svg { background-color: transparent; } .edgeLabel { color: #FFFFFF !important; background-color: transparent !important; }"}}%%
+flowchart LR
+    subgraph Settings
+        PV["parser_version<br/>docling-visual-v2"]
+        CV["chunker_version<br/>semantic-token-entity-metadata-v9"]
+        SV["schema_version = 3"]
+        EM["embedding_model<br/>from project vectorStore mapping"]
+    end
+
+    subgraph Source
+        DV["document.version<br/>blob sha | issue updated | page version"]
+        DH["document.content_hash"]
+    end
+
+    PV & CV & SV & EM & DV & DH --> CMP{"all 6 equal to<br/>stored manifest?"}
+    CMP -->|yes| SKIP["SKIP — chunks stay as the<br/>old chunker produced them"]
+    CMP -->|no| REIDX["full re-analyze, re-chunk,<br/>re-embed, re-upsert"]
+
+    classDef setting fill:#7C3AED,stroke:#7C3AED,color:#FFFFFF,stroke-width:2px;
+    classDef source fill:#2563EB,stroke:#2563EB,color:#FFFFFF,stroke-width:2px;
+    classDef decision fill:#B45309,stroke:#D97706,color:#FFFFFF,stroke-width:2px;
+    classDef success fill:#059669,stroke:#059669,color:#FFFFFF,stroke-width:2px;
+    classDef reprocess fill:#C2410C,stroke:#EA580C,color:#FFFFFF,stroke-width:2px;
+    class PV,CV,SV,EM setting;
+    class DV,DH source;
+    class CMP decision;
+    class SKIP success;
+    class REIDX reprocess;
+```
+
+**Presentation takeaway:** compatibility is explicit and deterministic; no record is silently reused after a processing-contract change.
