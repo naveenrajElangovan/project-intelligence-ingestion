@@ -21,6 +21,7 @@ USAGE
 
 import json
 import sys
+import urllib.error
 import urllib.request
 
 BASE = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
@@ -29,8 +30,13 @@ BASE = "http://127.0.0.1:8000/api/v2/tenants/default_tenant/databases/default_da
 def _get(url, payload=None):
     data = json.dumps(payload).encode() if payload is not None else None
     headers = {"Content-Type": "application/json"} if data else {}
-    with urllib.request.urlopen(urllib.request.Request(url, data, headers), timeout=60) as r:
-        return json.loads(r.read())
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, data, headers), timeout=60
+        ) as response:
+            return json.loads(response.read())
+    except (OSError, TimeoutError, urllib.error.URLError) as error:
+        raise RuntimeError(f"Chroma request failed for {url}: {error}") from error
 
 
 def live():
@@ -69,7 +75,17 @@ def live():
 
 def main(path):
     baseline = json.load(open(path))["collections"]
-    now = live()
+    print("Checking live Chroma contents...", flush=True)
+    try:
+        now = live()
+    except Exception as error:
+        print(
+            "RESTORE CHECK FAILED: live Chroma could not be read.\n"
+            f"  {type(error).__name__}: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
     problems = []
     for project, want in baseline.items():
         have = now.get(project)
