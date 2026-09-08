@@ -6,7 +6,7 @@ import pytest
 
 from app.models import SourceChunk, SourceDocument
 from app.projects import VectorStoreRoute
-from app.vector import ChromaVectorStore, _observed_vocabulary
+from app.vector import ChromaVectorStore, _observed_vocabulary, _source_filter
 
 
 class FakeEmbedder:
@@ -18,6 +18,7 @@ class FakeCollection:
     def __init__(self, *, fail_upsert: bool = False) -> None:
         self.fail_upsert = fail_upsert
         self.events: list[str] = []
+        self.deleted_where = None
 
     def get(self, *, where=None, ids=None, include=None):
         if ids is not None:
@@ -33,6 +34,7 @@ class FakeCollection:
 
     def delete(self, *, ids=None, where=None):
         self.events.append("delete")
+        self.deleted_where = where
 
 
 def _document() -> SourceDocument:
@@ -85,13 +87,44 @@ def test_interrupted_upsert_never_deletes_existing_generation() -> None:
     assert collection.events == ["read-prior", "upsert"]
 
 
+def test_provider_delete_is_project_scoped_without_pinning_access_policy() -> None:
+    collection = FakeCollection()
+
+    asyncio.run(
+        _store(collection).delete_provider(
+            VectorStoreRoute("project-intelligence", "chunk_text"),
+            "DEMO",
+            "CONFLUENCE",
+        )
+    )
+
+    assert collection.deleted_where == {
+        "$and": [{"project_id": "DEMO"}, {"provider": "CONFLUENCE"}]
+    }
+
+
+def test_source_filter_covers_every_policy_inside_one_project_source() -> None:
+    where = _source_filter("DEMO", "CONFLUENCE", "page:123")
+
+    assert where == {
+        "$and": [
+            {"project_id": "DEMO"},
+            {"provider": "CONFLUENCE"},
+            {"source_id": "page:123"},
+        ]
+    }
+    assert "access_policy_id" not in str(where)
+
+
 def test_project_vocabulary_is_rebuilt_from_persisted_chunk_metadata() -> None:
     class VocabularyCollection:
         def __init__(self) -> None:
             self.written = None
+            self.read_where = None
 
         def get(self, *, where=None, include=None, limit=None, offset=0):
             assert where is not None
+            self.read_where = where
             return {
                 "metadatas": [
                     {
@@ -129,6 +162,7 @@ def test_project_vocabulary_is_rebuilt_from_persisted_chunk_metadata() -> None:
     assert vocabulary["code_extensions"] == [".rs"]
     assert vocabulary["languages"] == ["en", "es"]
     assert collection.written["metadatas"][0]["record_kind"] == "__vocabulary__"
+    assert collection.read_where == {"project_id": "DEMO"}
 
 
 def test_vocabulary_requires_five_observations_and_reports_corpus_shape() -> None:

@@ -7,13 +7,14 @@ import re
 from collections import Counter
 from statistics import median
 from pathlib import Path
+from app.access_rules import resolve_access_policy
 from app.chroma_collections import (
     project_collection_metadata,
     project_collection_name,
     verify_project_collection,
 )
 from app.models import SourceChunk, SourceDocument
-from app.projects import VectorStoreRoute
+from app.projects import SourceAccessRule, VectorStoreRoute
 
 _RESERVED_METADATA_KEYS = {
     "access_policy_id", "canonical_chunk_id", "chunk_ordinal", "content_hash",
@@ -45,7 +46,13 @@ class ChromaVectorStore:
         from chromadb import HttpClient
         await _with_retry(lambda: HttpClient(host=self._host, port=self._port).heartbeat())
         return True
-    async def replace_document(self, mapping: VectorStoreRoute, document: SourceDocument, chunks: tuple[SourceChunk, ...]) -> None:
+    async def replace_document(
+        self,
+        mapping: VectorStoreRoute,
+        document: SourceDocument,
+        chunks: tuple[SourceChunk, ...],
+        source_access_rules: tuple[SourceAccessRule, ...] = (),
+    ) -> None:
         if mapping.collection_name != self._collection_name:
             raise ValueError("The project collection does not match the configured Chroma collection.")
         collection = await _with_retry(lambda: self._collection(document.project_id))
@@ -57,7 +64,7 @@ class ChromaVectorStore:
             return
         storage_ids = [_storage_id(document, chunk.ordinal) for chunk in chunks]
         vectors = await asyncio.to_thread(self._embedder.embed_passages, [chunk.embedding_text or chunk.content for chunk in chunks])
-        await _with_retry(lambda: collection.upsert(ids=storage_ids, embeddings=vectors, documents=[chunk.content for chunk in chunks], metadatas=[_metadata(mapping, document, chunk) for chunk in chunks]))
+        await _with_retry(lambda: collection.upsert(ids=storage_ids, embeddings=vectors, documents=[chunk.content for chunk in chunks], metadatas=[_metadata(mapping, document, chunk, source_access_rules) for chunk in chunks]))
         written = await _with_retry(lambda: collection.get(ids=storage_ids, include=[]))
         if len(written.get("ids") or []) != len(storage_ids):
             raise RuntimeError("Chroma did not persist the complete replacement generation.")
@@ -69,7 +76,11 @@ class ChromaVectorStore:
         await _with_retry(lambda: collection.delete(where=_source_filter(project_id, provider, source_id)))
     async def delete_provider(self, mapping: VectorStoreRoute, project_id: str, provider: str) -> bool:
         collection = await _with_retry(lambda: self._collection(project_id))
-        await _with_retry(lambda: collection.delete(where={"$and": [{"project_id": project_id}, {"access_policy_id": f"project:{project_id}"}, {"provider": provider}]}))
+        await _with_retry(
+            lambda: collection.delete(
+                where={"$and": [{"project_id": project_id}, {"provider": provider}]}
+            )
+        )
         return True
 
     async def refresh_project_vocabulary(
@@ -83,10 +94,7 @@ class ChromaVectorStore:
         metadatas: list[dict[str, object]] = []
         offset = 0
         where = {
-            "$and": [
-                {"project_id": project_id},
-                {"access_policy_id": f"project:{project_id}"},
-            ]
+            "project_id": project_id,
         }
         while True:
             page = await _with_retry(
@@ -155,13 +163,24 @@ async def _with_retry(operation, attempts: int = 3):
             await asyncio.sleep(0.25 * (2**attempt))
 
 def _source_filter(project_id: str, provider: str, source_id: str) -> dict[str, object]:
-    return {"$and": [{"project_id": project_id}, {"access_policy_id": f"project:{project_id}"}, {"provider": provider}, {"source_id": source_id}]}
+    return {
+        "$and": [
+            {"project_id": project_id},
+            {"provider": provider},
+            {"source_id": source_id},
+        ]
+    }
 def _storage_id(document: SourceDocument, ordinal: int) -> str:
     identity = f"{document.project_id}|{document.provider}|{document.source_id}|{ordinal}"
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 def _scalar(value: object) -> str | int | float | bool:
     return value if isinstance(value, (str, int, float, bool)) else json.dumps(value, sort_keys=True, default=str)
-def _metadata(mapping: VectorStoreRoute, document: SourceDocument, chunk: SourceChunk) -> dict[str, object]:
+def _metadata(
+    mapping: VectorStoreRoute,
+    document: SourceDocument,
+    chunk: SourceChunk,
+    source_access_rules: tuple[SourceAccessRule, ...] = (),
+) -> dict[str, object]:
     reserved = {*_RESERVED_METADATA_KEYS, mapping.embedding_field}
     extra: dict[str, object] = {}
     for source in (document.metadata, chunk.metadata):
@@ -177,7 +196,11 @@ def _metadata(mapping: VectorStoreRoute, document: SourceDocument, chunk: Source
         mapping.embedding_field: chunk.embedding_text or chunk.content,
         "canonical_chunk_id": chunk.chunk_id,
         "project_id": document.project_id,
-        "access_policy_id": f"project:{document.project_id}",
+        "access_policy_id": resolve_access_policy(
+            source_access_rules,
+            document,
+            f"project:{document.project_id}",
+        ),
         "provider": document.provider,
         "source_id": document.source_id,
         "source_type": document.source_type,

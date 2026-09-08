@@ -7,7 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from app.config import Settings
 from app.content_security import ContentSecurityScanner, QuarantinedDocument
 from app.models import DocumentIndexResult, SourceChunk, SourceDocument, StructuredArtifact
-from app.projects import VectorStoreRoute
+from app.projects import SourceAccessRule, VectorStoreRoute
 from app.state import ManifestStore, SourceManifest
 from app.structured_chunking import StructuredDocumentChunker
 from app.telemetry import observe_document_stage, record_document_result, started
@@ -19,6 +19,7 @@ class IngestionState(TypedDict, total=False):
     scope: str
     scan_id: str
     vector_store: VectorStoreRoute
+    source_access_rules: tuple[SourceAccessRule, ...]
     force: bool
     manifest: SourceManifest | None
     operation: Literal["INDEX", "DELETE", "SKIP"]
@@ -74,6 +75,7 @@ class DocumentIngestionWorkflow:
         vector_store: VectorStoreRoute,
         *,
         force: bool = False,
+        source_access_rules: tuple[SourceAccessRule, ...] = (),
     ) -> DocumentIndexResult:
         try:
             state = await self._graph.ainvoke(
@@ -82,6 +84,7 @@ class DocumentIngestionWorkflow:
                     "scope": scope,
                     "scan_id": scan_id,
                     "vector_store": vector_store,
+                    "source_access_rules": source_access_rules,
                     "force": force,
                 }
             )
@@ -187,7 +190,14 @@ class DocumentIngestionWorkflow:
             observe_document_stage(document.provider, "write", began)
             return {"result": DocumentIndexResult("DELETED")}
         chunks = state.get("chunks", ())
-        await self._vectors.replace_document(state["vector_store"], document, chunks)
+        rule_arguments = (
+            {"source_access_rules": state["source_access_rules"]}
+            if state.get("source_access_rules")
+            else {}
+        )
+        await self._vectors.replace_document(
+            state["vector_store"], document, chunks, **rule_arguments
+        )
         observe_document_stage(document.provider, "write", began)
         visual = state["artifact"].visual
         return {

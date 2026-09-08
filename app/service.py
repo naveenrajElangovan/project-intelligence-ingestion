@@ -205,12 +205,18 @@ class IngestionService:
                             content_bytes=content_bytes,
                             local_visuals=tuple(local_visuals),
                         )
+                        rule_arguments = (
+                            {"source_access_rules": project.source_access_rules}
+                            if project.source_access_rules
+                            else {}
+                        )
                         result = await self._workflow.run(
                             document,
                             scope,
                             scan_id,
                             project.vector_store,
                             force=full,
+                            **rule_arguments,
                         )
                         if result.operation == "INDEXED":
                             indexed += 1
@@ -335,12 +341,18 @@ class IngestionService:
         async for document in documents:
             discovered += 1
             try:
+                rule_arguments = (
+                    {"source_access_rules": project.source_access_rules}
+                    if project.source_access_rules
+                    else {}
+                )
                 result = await self._workflow.run(
                     document,
                     scope,
                     scan_id,
                     project.vector_store,
                     force=full,
+                    **rule_arguments,
                 )
                 if result.operation == "INDEXED":
                     indexed += 1

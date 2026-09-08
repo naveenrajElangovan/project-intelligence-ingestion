@@ -223,12 +223,18 @@ async def _run() -> None:
             mime_type=mimetypes.guess_type(item.relative_path)[0] or "text/plain",
         )
         try:
+            rule_arguments = (
+                {"source_access_rules": project.source_access_rules}
+                if project.source_access_rules
+                else {}
+            )
             result = await workflow.run(
                 document,
                 scope,
                 scan_id,
                 project.vector_store,
                 force=arguments.full,
+                **rule_arguments,
             )
         except QuarantinedDocument as error:
             quarantined += 1

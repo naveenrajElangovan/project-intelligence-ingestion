@@ -6,7 +6,7 @@ from app.chroma_collections import (
     verify_project_collection,
 )
 from app.models import SourceChunk, SourceDocument
-from app.projects import VectorStoreRoute
+from app.projects import SourceAccessRule, VectorStoreRoute
 from app.vector import _metadata
 
 
@@ -56,3 +56,34 @@ def test_filterable_structure_scalars_are_promoted() -> None:
     values = _metadata(VectorStoreRoute("project-intelligence", "chunk_text"), document, chunk)
     assert values["structure_root"] == "Module"
     assert values["structure_leaf"] == "One"
+
+
+def test_configured_source_rule_stamps_department_policy() -> None:
+    document = SourceDocument(
+        project_id="DEMO",
+        provider="CONFLUENCE",
+        source_id="page:one",
+        source_type="PAGE",
+        title="Linux POS — sales",
+        reference="one",
+        source_url="https://example.atlassian.net/wiki/pages/one",
+        version="1",
+        content="content",
+        updated_at=None,
+    )
+    chunk = SourceChunk("one", "one", 0, "content", "hash")
+    rule = SourceAccessRule(
+        provider="CONFLUENCE",
+        match_field="TITLE",
+        prefix="Linux POS",
+        access_policy_id="department:DEMO:STORE_OPERATIONS",
+    )
+
+    values = _metadata(
+        VectorStoreRoute("project-intelligence", "chunk_text"),
+        document,
+        chunk,
+        (rule,),
+    )
+
+    assert values["access_policy_id"] == "department:DEMO:STORE_OPERATIONS"

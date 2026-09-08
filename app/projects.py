@@ -49,6 +49,21 @@ class ProjectIngestionSchedule:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceAccessRule:
+    provider: str
+    match_field: str
+    prefix: str
+    access_policy_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalProfile:
+    max_chunks_per_source: int
+    rerank_top_n: int
+    mixed_source_top_n: int
+
+
+@dataclass(frozen=True, slots=True)
 class AtlassianGateway:
     cloud_id: str
     resource_url: str
@@ -64,6 +79,8 @@ class IngestionProject:
     vector_store: VectorStoreRoute
     schedule: ProjectIngestionSchedule = ProjectIngestionSchedule()
     atlassian: AtlassianGateway | None = None
+    source_access_rules: tuple[SourceAccessRule, ...] = ()
+    retrieval_profile: RetrievalProfile | None = None
 
     @property
     def repository(self) -> RepositoryMapping:
@@ -109,7 +126,25 @@ def project_from_payload(payload: dict[str, object]) -> IngestionProject:
     atlassian_payload = (
         payload.get("atlassian") if isinstance(payload.get("atlassian"), dict) else None
     )
-    return IngestionProject(
+    source_access_rules = tuple(
+        SourceAccessRule(
+            provider=str(item.get("provider") or ""),
+            match_field=str(item.get("matchField") or ""),
+            prefix=str(item.get("prefix") or ""),
+            access_policy_id=str(item.get("accessPolicyId") or ""),
+        )
+        for item in _list(payload.get("sourceAccessRules"))
+        if isinstance(item, dict)
+    )
+    profile_payload = (
+        payload.get("retrievalProfile")
+        if isinstance(payload.get("retrievalProfile"), dict)
+        and payload.get("retrievalProfile")
+        else None
+    )
+    from app.access_rules import validate_source_access_rules
+
+    project = IngestionProject(
         project_id=str(payload.get("projectId") or ""),
         display_name=str(payload.get("displayName") or payload.get("projectId") or ""),
         repositories=repositories,
@@ -137,7 +172,19 @@ def project_from_payload(payload: dict[str, object]) -> IngestionProject:
             if atlassian_payload
             else None
         ),
+        source_access_rules=source_access_rules,
+        retrieval_profile=(
+            RetrievalProfile(
+                max_chunks_per_source=int(profile_payload["maxChunksPerSource"]),
+                rerank_top_n=int(profile_payload["rerankTopN"]),
+                mixed_source_top_n=int(profile_payload["mixedSourceTopN"]),
+            )
+            if profile_payload is not None
+            else None
+        ),
     )
+    validate_source_access_rules(project.project_id, project.source_access_rules)
+    return project
 
 
 def _repository(item: dict[str, object]) -> RepositoryMapping | None:
