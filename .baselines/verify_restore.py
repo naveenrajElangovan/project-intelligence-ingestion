@@ -61,6 +61,8 @@ def live():
             "by_source_type": by("source_type"),
             "by_provider": by("provider"),
             "by_access_policy_id": by("access_policy_id"),
+            "by_schema_version": by("schema_version"),
+            "by_embedding_model": by("embedding_model"),
         }
     return out
 
@@ -79,7 +81,12 @@ def main(path):
                 problems.append(f"{project}.{field}: {have[field]} < baseline {want[field]}")
             elif have[field] != want[field]:
                 print(f"  note {project}.{field}: {have[field]} vs baseline {want[field]} (grew)")
-        for field in ("by_source_type", "by_provider"):
+        for field in (
+            "by_source_type",
+            "by_provider",
+            "by_schema_version",
+            "by_embedding_model",
+        ):
             for key, count in want[field].items():
                 got = have[field].get(key, 0)
                 if got < count:

@@ -11,6 +11,7 @@
       "by_provider": {"LOCAL": 4158, "CONFLUENCE": 794, "GITHUB": 178, "JIRA": 1, "INGESTION": 1},
       "by_access_policy_id": {"project:T2.0": 5132},
       "by_schema_version": {"3": 5132},
+      "by_embedding_model": {"multilingual-e5-large": 5132},
       "by_language": {"und": 3543, "en": 1187, "es": 385, "mixed": 16, "": 1},
       "chunks_per_source": {"mean": 4.93, "max": 88, "min": 1}
     },
@@ -22,6 +23,7 @@
       "by_provider": {"CONFLUENCE": 618, "INGESTION": 1},
       "by_access_policy_id": {"project:T2.0-STORE": 619},
       "by_schema_version": {"3": 619},
+      "by_embedding_model": {"multilingual-e5-large": 619},
       "by_language": {"es": 304, "en": 290, "und": 20, "mixed": 4, "": 1},
       "chunks_per_source": {"mean": 25.79, "max": 45, "min": 1}
     }
