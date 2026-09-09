@@ -127,11 +127,6 @@ async def github_webhook(
         )
         scope = f"{full_name}|{branch}"
         indexed = deleted = chunks_written = unchanged = 0
-        rule_arguments = (
-            {"source_access_rules": project.source_access_rules}
-            if project.source_access_rules
-            else {}
-        )
         for file in files:
             if file.status == "renamed" and file.previous_path:
                 prior = _github_document(
@@ -149,7 +144,7 @@ async def github_webhook(
                     scope,
                     delivery,
                     project.vector_store,
-                    **rule_arguments,
+                    source_access_rules=project.source_access_rules,
                 )
                 deleted += int(prior_result.operation == "DELETED")
             if file.status != "removed" and file.content is None:
@@ -170,7 +165,7 @@ async def github_webhook(
                 scope,
                 delivery,
                 project.vector_store,
-                **rule_arguments,
+                source_access_rules=project.source_access_rules,
             )
             if result.operation == "INDEXED":
                 indexed += 1

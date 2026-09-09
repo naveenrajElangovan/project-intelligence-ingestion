@@ -164,9 +164,7 @@ def test_merged_pr_passes_project_access_rules_to_the_workflow(monkeypatch) -> N
         app.dependency_overrides.clear()
 
     assert response.status_code == 200
-    assert workflow.rule_arguments == [
-        {"source_access_rules": reader.source_access_rules}
-    ]
+    assert workflow.rule_arguments == [{"source_access_rules": reader.source_access_rules}]
 
 
 def test_invalid_signature_is_rejected_before_project_lookup() -> None:

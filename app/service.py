@@ -177,6 +177,7 @@ class IngestionService:
                         access_policy_id=current_access_policy_id,
                         full=full,
                     ):
+                        assert manifest is not None
                         await self._manifests.touch_manifest(manifest, scan_id)
                         unchanged += 1
                         record_document_result("GITHUB", "UNCHANGED")
