@@ -139,7 +139,13 @@ async def github_webhook(
                     None,
                     True,
                 )
-                prior_result = await workflow.run(prior, scope, delivery, project.vector_store)
+                prior_result = await workflow.run(
+                    prior,
+                    scope,
+                    delivery,
+                    project.vector_store,
+                    source_access_rules=project.source_access_rules,
+                )
                 deleted += int(prior_result.operation == "DELETED")
             if file.status != "removed" and file.content is None:
                 unchanged += 1
@@ -154,7 +160,13 @@ async def github_webhook(
                 file.content,
                 file.status == "removed",
             )
-            result = await workflow.run(document, scope, delivery, project.vector_store)
+            result = await workflow.run(
+                document,
+                scope,
+                delivery,
+                project.vector_store,
+                source_access_rules=project.source_access_rules,
+            )
             if result.operation == "INDEXED":
                 indexed += 1
                 chunks_written += result.chunks_written

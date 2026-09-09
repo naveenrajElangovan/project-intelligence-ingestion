@@ -31,6 +31,7 @@ class SourceManifest:
     chunker_version: str = "legacy"
     embedding_profile: str = "legacy"
     schema_version: str = "1"
+    access_policy_id: str = ""
 
 
 class ManifestStore(Protocol):
@@ -57,6 +58,7 @@ class ManifestStore(Protocol):
         chunker_version: str = "legacy",
         embedding_profile: str = "legacy",
         schema_version: str = "1",
+        access_policy_id: str = "",
     ) -> None: ...
 
     async def mark_deleted(self, manifest: SourceManifest, scan_id: str) -> None: ...
@@ -196,6 +198,7 @@ class AzureTableManifestStore:
         chunker_version: str = "legacy",
         embedding_profile: str = "legacy",
         schema_version: str = "1",
+        access_policy_id: str = "",
     ) -> None:
         entity = {
             "PartitionKey": _partition(document.project_id, document.provider, scope),
@@ -216,6 +219,7 @@ class AzureTableManifestStore:
             "chunker_version": chunker_version,
             "embedding_profile": embedding_profile,
             "schema_version": schema_version,
+            "access_policy_id": access_policy_id,
             "indexed_at": datetime.now(UTC).isoformat(),
         }
         await asyncio.to_thread(self._table.upsert_entity, entity, mode=UpdateMode.REPLACE)
@@ -243,6 +247,7 @@ class AzureTableManifestStore:
             chunker_version=manifest.chunker_version,
             embedding_profile=manifest.embedding_profile,
             schema_version=manifest.schema_version,
+            access_policy_id=manifest.access_policy_id,
         )
 
     async def touch_manifest(self, manifest: SourceManifest, scan_id: str) -> None:
@@ -267,6 +272,7 @@ class AzureTableManifestStore:
             "chunker_version": manifest.chunker_version,
             "embedding_profile": manifest.embedding_profile,
             "schema_version": manifest.schema_version,
+            "access_policy_id": manifest.access_policy_id,
         }
         await asyncio.to_thread(self._table.upsert_entity, entity, mode=UpdateMode.REPLACE)
 
@@ -428,6 +434,7 @@ def _manifest(entity: dict[str, object]) -> SourceManifest:
         chunker_version=str(entity.get("chunker_version") or "legacy"),
         embedding_profile=str(entity.get("embedding_profile") or "legacy"),
         schema_version=str(entity.get("schema_version") or "1"),
+        access_policy_id=str(entity.get("access_policy_id") or ""),
     )
 
 

@@ -52,6 +52,7 @@ class ChromaVectorStore:
         document: SourceDocument,
         chunks: tuple[SourceChunk, ...],
         source_access_rules: tuple[SourceAccessRule, ...] = (),
+        access_policy_id: str | None = None,
     ) -> None:
         if mapping.collection_name != self._collection_name:
             raise ValueError("The project collection does not match the configured Chroma collection.")
@@ -64,7 +65,7 @@ class ChromaVectorStore:
             return
         storage_ids = [_storage_id(document, chunk.ordinal) for chunk in chunks]
         vectors = await asyncio.to_thread(self._embedder.embed_passages, [chunk.embedding_text or chunk.content for chunk in chunks])
-        await _with_retry(lambda: collection.upsert(ids=storage_ids, embeddings=vectors, documents=[chunk.content for chunk in chunks], metadatas=[_metadata(mapping, document, chunk, source_access_rules) for chunk in chunks]))
+        await _with_retry(lambda: collection.upsert(ids=storage_ids, embeddings=vectors, documents=[chunk.content for chunk in chunks], metadatas=[_metadata(mapping, document, chunk, source_access_rules, access_policy_id=access_policy_id) for chunk in chunks]))
         written = await _with_retry(lambda: collection.get(ids=storage_ids, include=[]))
         if len(written.get("ids") or []) != len(storage_ids):
             raise RuntimeError("Chroma did not persist the complete replacement generation.")
@@ -180,6 +181,8 @@ def _metadata(
     document: SourceDocument,
     chunk: SourceChunk,
     source_access_rules: tuple[SourceAccessRule, ...] = (),
+    *,
+    access_policy_id: str | None = None,
 ) -> dict[str, object]:
     reserved = {*_RESERVED_METADATA_KEYS, mapping.embedding_field}
     extra: dict[str, object] = {}
@@ -196,7 +199,8 @@ def _metadata(
         mapping.embedding_field: chunk.embedding_text or chunk.content,
         "canonical_chunk_id": chunk.chunk_id,
         "project_id": document.project_id,
-        "access_policy_id": resolve_access_policy(
+        "access_policy_id": access_policy_id
+        or resolve_access_policy(
             source_access_rules,
             document,
             f"project:{document.project_id}",
