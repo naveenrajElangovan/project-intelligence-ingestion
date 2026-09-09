@@ -1,0 +1,33 @@
+[importlinter]
+root_package = app
+
+[importlinter:contract:application-does-not-depend-on-http-api]
+name = Ingestion internals do not depend on the HTTP API
+type = forbidden
+source_modules =
+    app.access_rules
+    app.atlassian
+    app.chroma_collections
+    app.chunking
+    app.config
+    app.content_security
+    app.control_plane
+    app.embedding
+    app.format_analysis
+    app.github
+    app.globbing
+    app.jobs
+    app.logging
+    app.models
+    app.parsing
+    app.projects
+    app.security
+    app.service
+    app.state
+    app.structured_chunking
+    app.telemetry
+    app.vector
+    app.visual
+    app.workflow
+forbidden_modules =
+    app.api

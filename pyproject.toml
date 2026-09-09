@@ -26,10 +26,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.4,<9"]
+dev = [
+  "coverage[toml]>=7.10,<8",
+  "import-linter>=2.4,<3",
+  "mypy>=1.17,<2",
+  "pre-commit>=4.3,<5",
+  "pytest>=8.4,<9",
+  "pytest-cov>=6,<7",
+  "ruff>=0.12,<1",
+]
 worker = [
   "azure-servicebus==7.14.3",
   "docling==2.120.1",
+  "sentence-transformers==5.7.0",
   "transformers==5.8.1",
 ]
 
@@ -40,3 +49,25 @@ packages = ["app"]
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+files = ["app"]
+python_version = "3.12"
+show_error_codes = true
+warn_unused_configs = true
+
+[tool.coverage.run]
+source = ["app"]
+
+[tool.coverage.report]
+fail_under = 70.08
+precision = 2
+show_missing = true
+skip_covered = false
