@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,14 +118,23 @@ def project_from_payload(payload: dict[str, object]) -> IngestionProject:
         for item in _list(payload.get("confluenceSpaces"))
         if isinstance(item, dict) and item.get("siteUrl") and item.get("spaceId")
     )
-    vector_store = payload.get("vectorStore") if isinstance(payload.get("vectorStore"), dict) else {}
-    schedule = (
-        payload.get("ingestionSchedule")
-        if isinstance(payload.get("ingestionSchedule"), dict)
+    vector_store_value = payload.get("vectorStore")
+    vector_store = (
+        cast(dict[str, object], vector_store_value)
+        if isinstance(vector_store_value, dict)
         else {}
     )
+    schedule_value = payload.get("ingestionSchedule")
+    schedule = (
+        cast(dict[str, object], schedule_value)
+        if isinstance(schedule_value, dict)
+        else {}
+    )
+    atlassian_value = payload.get("atlassian")
     atlassian_payload = (
-        payload.get("atlassian") if isinstance(payload.get("atlassian"), dict) else None
+        cast(dict[str, object], atlassian_value)
+        if isinstance(atlassian_value, dict)
+        else None
     )
     source_access_rules = tuple(
         SourceAccessRule(
@@ -137,10 +146,10 @@ def project_from_payload(payload: dict[str, object]) -> IngestionProject:
         for item in _list(payload.get("sourceAccessRules"))
         if isinstance(item, dict)
     )
+    profile_value = payload.get("retrievalProfile")
     profile_payload = (
-        payload.get("retrievalProfile")
-        if isinstance(payload.get("retrievalProfile"), dict)
-        and payload.get("retrievalProfile")
+        cast(dict[str, object], profile_value)
+        if isinstance(profile_value, dict) and profile_value
         else None
     )
     from app.access_rules import validate_source_access_rules
@@ -176,11 +185,18 @@ def project_from_payload(payload: dict[str, object]) -> IngestionProject:
         source_access_rules=source_access_rules,
         retrieval_profile=(
             RetrievalProfile(
-                max_chunks_per_source=int(profile_payload["maxChunksPerSource"]),
-                rerank_top_n=int(profile_payload["rerankTopN"]),
-                mixed_source_top_n=int(profile_payload["mixedSourceTopN"]),
+                max_chunks_per_source=int(
+                    cast(str, profile_payload["maxChunksPerSource"])
+                ),
+                rerank_top_n=int(cast(str, profile_payload["rerankTopN"])),
+                mixed_source_top_n=int(
+                    cast(str, profile_payload["mixedSourceTopN"])
+                ),
                 rerank_score_threshold=float(
-                    profile_payload.get("rerankScoreThreshold", 0.10)
+                    cast(
+                        str,
+                        profile_payload.get("rerankScoreThreshold", 0.10),
+                    )
                 ),
             )
             if profile_payload is not None

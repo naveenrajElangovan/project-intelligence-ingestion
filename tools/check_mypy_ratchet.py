@@ -13,7 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-MAX_ERRORS = 85
+MAX_ERRORS = 70
 ERROR_PATTERN = re.compile(r"^.+:\d+: error:", re.MULTILINE)
 STRICT_MODULES = (
     "app/access_rules.py",
