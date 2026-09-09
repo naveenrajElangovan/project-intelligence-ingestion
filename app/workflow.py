@@ -4,6 +4,7 @@ from typing import Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from app.access_rules import resolve_access_policy
 from app.config import Settings
 from app.content_security import ContentSecurityScanner, QuarantinedDocument
 from app.models import DocumentIndexResult, SourceChunk, SourceDocument, StructuredArtifact
@@ -20,6 +21,7 @@ class IngestionState(TypedDict, total=False):
     scan_id: str
     vector_store: VectorStoreRoute
     source_access_rules: tuple[SourceAccessRule, ...]
+    resolved_access_policy_id: str
     force: bool
     manifest: SourceManifest | None
     operation: Literal["INDEX", "DELETE", "SKIP"]
@@ -130,6 +132,11 @@ class DocumentIngestionWorkflow:
             state["scope"],
             document.source_id,
         )
+        resolved_access_policy_id = resolve_access_policy(
+            state.get("source_access_rules", ()),
+            document,
+            f"project:{document.project_id}",
+        )
         if document.deleted:
             operation: Literal["INDEX", "DELETE", "SKIP"] = (
                 "SKIP" if manifest is None or manifest.deleted else "DELETE"
@@ -143,12 +150,17 @@ class DocumentIngestionWorkflow:
             and manifest.chunker_version == self._settings.chunker_version
             and manifest.embedding_profile == state["vector_store"].embedding_model
             and manifest.schema_version == state["vector_store"].schema_version
+            and manifest.access_policy_id == resolved_access_policy_id
         ):
             operation = "SKIP"
         else:
             operation = "INDEX"
         observe_document_stage(document.provider, "inspect", began)
-        return {"manifest": manifest, "operation": operation}
+        return {
+            "manifest": manifest,
+            "operation": operation,
+            "resolved_access_policy_id": resolved_access_policy_id,
+        }
 
     async def _analyze(self, state: IngestionState) -> IngestionState:
         began = started()
@@ -190,13 +202,11 @@ class DocumentIngestionWorkflow:
             observe_document_stage(document.provider, "write", began)
             return {"result": DocumentIndexResult("DELETED")}
         chunks = state.get("chunks", ())
-        rule_arguments = (
-            {"source_access_rules": state["source_access_rules"]}
-            if state.get("source_access_rules")
-            else {}
-        )
         await self._vectors.replace_document(
-            state["vector_store"], document, chunks, **rule_arguments
+            state["vector_store"],
+            document,
+            chunks,
+            access_policy_id=state["resolved_access_policy_id"],
         )
         observe_document_stage(document.provider, "write", began)
         visual = state["artifact"].visual
@@ -235,6 +245,7 @@ class DocumentIngestionWorkflow:
             chunker_version=self._settings.chunker_version,
             embedding_profile=state["vector_store"].embedding_model,
             schema_version=state["vector_store"].schema_version,
+            access_policy_id=state["resolved_access_policy_id"],
         )
         observe_document_stage(state["document"].provider, "commit", began)
         record_document_result(

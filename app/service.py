@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.atlassian import AtlassianSourceClient
+from app.access_rules import resolve_access_policy
 from app.chunking import BINARY_DOCUMENT_EXTENSIONS
 from app.config import Settings
 from app.control_plane import BackendControlPlaneClient
@@ -14,11 +15,29 @@ from app.github import GitHubAppClient
 from app.models import ProviderIngestionResult, SourceDocument, SourceVisualInput
 from app.visual import resolve_markdown_asset_paths
 from app.projects import IngestionProject
-from app.state import ManifestStore
+from app.state import ManifestStore, SourceManifest
 from app.workflow import DocumentIngestionWorkflow
 from app.telemetry import observe_scope, record_document_failure
 
 logger = logging.getLogger(__name__)
+
+
+def _github_manifest_is_unchanged(
+    manifest: SourceManifest | None,
+    *,
+    blob_sha: str,
+    access_policy_id: str,
+    full: bool,
+) -> bool:
+    """Return true only when both GitHub content and its resolved label are unchanged."""
+
+    return bool(
+        not full
+        and manifest is not None
+        and not manifest.deleted
+        and manifest.version == blob_sha
+        and manifest.access_policy_id == access_policy_id
+    )
 
 
 class IngestionService:
@@ -135,12 +154,28 @@ class IngestionService:
                     manifest = await self._manifests.get_manifest(
                         project.project_id, "GITHUB", scope, source_id
                     )
-                    if (
-                        not full
-                        and
-                        manifest is not None
-                        and not manifest.deleted
-                        and manifest.version == item.blob_sha
+                    current_access_policy_id = resolve_access_policy(
+                        project.source_access_rules,
+                        SourceDocument(
+                            project_id=project.project_id,
+                            provider="GITHUB",
+                            source_id=source_id,
+                            source_type="CODE",
+                            title=item.path,
+                            reference=f"{mapping.full_name}:{branch}:{item.path}",
+                            source_url="",
+                            version=item.blob_sha,
+                            content="",
+                            updated_at=None,
+                            metadata={"path": item.path},
+                        ),
+                        f"project:{project.project_id}",
+                    )
+                    if _github_manifest_is_unchanged(
+                        manifest,
+                        blob_sha=item.blob_sha,
+                        access_policy_id=current_access_policy_id,
+                        full=full,
                     ):
                         await self._manifests.touch_manifest(manifest, scan_id)
                         unchanged += 1

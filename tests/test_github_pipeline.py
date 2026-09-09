@@ -11,6 +11,7 @@ from app.dependencies import get_document_workflow, get_project_reader
 from app.models import ChangedFile, DocumentIndexResult
 from app.projects import (
     IngestionProject,
+    SourceAccessRule,
     VectorStoreRoute,
     ProjectIngestionSchedule,
     RepositoryMapping,
@@ -20,6 +21,7 @@ from app.main import app
 
 class FakeProjectReader:
     github_merged_pr_enabled = True
+    source_access_rules = ()
 
     async def find_by_repository(self, owner: str, repository: str):
         assert (owner, repository) == ("personal-owner", "private-repo")
@@ -44,18 +46,21 @@ class FakeProjectReader:
             schedule=ProjectIngestionSchedule(
                 github_merged_pr_enabled=self.github_merged_pr_enabled
             ),
+            source_access_rules=self.source_access_rules,
         )
 
 
 class FakeWorkflow:
     def __init__(self, fail: bool = False) -> None:
         self.documents = []
+        self.rule_arguments = []
         self.fail = fail
 
-    async def run(self, document, scope, scan_id, vector_store):
+    async def run(self, document, scope, scan_id, vector_store, **kwargs):
         if self.fail:
             raise RuntimeError("Chroma unavailable")
         self.documents.append(document)
+        self.rule_arguments.append(kwargs)
         return DocumentIndexResult("INDEXED", 1)
 
 
@@ -122,6 +127,46 @@ def test_merged_pr_is_resolved_from_backend_and_written_to_chroma(monkeypatch) -
     assert response.json()["storedChunks"] == 1
     assert len(workflow.documents) == 1
     assert workflow.documents[0].provider == "GITHUB"
+
+
+def test_merged_pr_passes_project_access_rules_to_the_workflow(monkeypatch) -> None:
+    workflow = FakeWorkflow()
+    reader = FakeProjectReader()
+    reader.source_access_rules = (
+        SourceAccessRule(
+            provider="GITHUB",
+            match_field="PATH",
+            prefix="coreApp/",
+            access_policy_id="department:POS_BOT:ENGINEERING",
+        ),
+    )
+    app.dependency_overrides[get_settings] = settings
+    app.dependency_overrides[get_project_reader] = lambda: reader
+    app.dependency_overrides[get_document_workflow] = lambda: workflow
+
+    async def changed_files(self, installation_id, pull_request_number, commit_sha):
+        return (
+            ChangedFile(
+                path="coreApp/Payment.kt",
+                status="modified",
+                previous_path=None,
+                content="class Payment",
+                content_hash="hash",
+                source_url="https://github.example/file",
+            ),
+        )
+
+    monkeypatch.setattr(github_api.GitHubAppClient, "pull_request_files", changed_files)
+    body = json.dumps(payload()).encode()
+    try:
+        response = client().post("/v1/webhooks/github", content=body, headers=headers(body))
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert workflow.rule_arguments == [
+        {"source_access_rules": reader.source_access_rules}
+    ]
 
 
 def test_invalid_signature_is_rejected_before_project_lookup() -> None:
