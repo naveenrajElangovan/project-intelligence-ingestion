@@ -38,6 +38,7 @@ dev = [
 worker = [
   "azure-servicebus==7.14.3",
   "docling==2.120.1",
+  "sentence-transformers==5.7.0",
   "transformers==5.8.1",
 ]
 
