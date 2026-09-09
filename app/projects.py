@@ -61,6 +61,7 @@ class RetrievalProfile:
     max_chunks_per_source: int
     rerank_top_n: int
     mixed_source_top_n: int
+    rerank_score_threshold: float = 0.10
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +179,9 @@ def project_from_payload(payload: dict[str, object]) -> IngestionProject:
                 max_chunks_per_source=int(profile_payload["maxChunksPerSource"]),
                 rerank_top_n=int(profile_payload["rerankTopN"]),
                 mixed_source_top_n=int(profile_payload["mixedSourceTopN"]),
+                rerank_score_threshold=float(
+                    profile_payload.get("rerankScoreThreshold", 0.10)
+                ),
             )
             if profile_payload is not None
             else None

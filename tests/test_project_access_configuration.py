@@ -33,6 +33,7 @@ def test_access_rules_and_retrieval_profile_are_parsed() -> None:
         "maxChunksPerSource": 12,
         "rerankTopN": 16,
         "mixedSourceTopN": 12,
+        "rerankScoreThreshold": 0.0,
     }
 
     project = project_from_payload(payload)
@@ -43,3 +44,4 @@ def test_access_rules_and_retrieval_profile_are_parsed() -> None:
     )
     assert project.retrieval_profile is not None
     assert project.retrieval_profile.max_chunks_per_source == 12
+    assert project.retrieval_profile.rerank_score_threshold == 0.0
