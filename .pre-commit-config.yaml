@@ -1,0 +1,25 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-lint
+        name: ruff lint
+        entry: python tools/check_ruff_ratchet.py lint
+        language: system
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format
+        entry: python tools/check_ruff_ratchet.py format
+        language: system
+        pass_filenames: false
+      - id: mypy-ratchet
+        name: mypy ratchet
+        entry: python tools/check_mypy_ratchet.py
+        language: system
+        pass_filenames: false
+        types: [python]
+      - id: import-boundaries
+        name: import boundaries
+        entry: lint-imports
+        language: system
+        pass_filenames: false
+        types: [python]
