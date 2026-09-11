@@ -1,7 +1,7 @@
 import base64
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     deletion_floor_documents: int = 1
     max_document_failures_per_scope: int = 5
     source_page_size: int = 100
+    jira_issue_concurrency: int = Field(default=4, ge=1, le=16)
+    jira_project_concurrency: int = Field(default=2, ge=1, le=8)
+    jira_reference_manifests: tuple[str, ...] = ()
+    jira_approved_reference_roots: tuple[str, ...] = ()
     max_attachment_bytes: int = 25_000_000
     chunk_max_tokens: int = 420
     code_chunk_max_tokens: int = 350

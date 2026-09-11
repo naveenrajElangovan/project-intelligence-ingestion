@@ -63,7 +63,7 @@ class ChromaVectorStore:
         if not chunks:
             await _with_retry(lambda: collection.delete(where=where))
             return
-        storage_ids = [_storage_id(document, chunk.ordinal) for chunk in chunks]
+        storage_ids = [hashlib.sha256(f"{chunk.chunk_id}|{document.version}".encode()).hexdigest() if document.provider == "JIRA" else _storage_id(document, chunk.ordinal) for chunk in chunks]
         vectors = await asyncio.to_thread(self._embedder.embed_passages, [chunk.embedding_text or chunk.content for chunk in chunks])
         await _with_retry(lambda: collection.upsert(ids=storage_ids, embeddings=vectors, documents=[chunk.content for chunk in chunks], metadatas=[_metadata(mapping, document, chunk, source_access_rules, access_policy_id=access_policy_id) for chunk in chunks]))
         written = await _with_retry(lambda: collection.get(ids=storage_ids, include=[]))
@@ -116,41 +116,34 @@ class ChromaVectorStore:
                 break
             offset += len(values)
 
-        vocabulary = _observed_vocabulary(project_id, metadatas)
-        logger.info(
-            "corpus_profile project_id=%s stats=%s recommended_retrieval_profile=%s human_approval_required=true",
-            project_id,
-            vocabulary["corpus_stats"],
-            vocabulary["recommended_retrieval_profile"],
-        )
-        document = json.dumps(vocabulary, sort_keys=True, separators=(",", ":"))
-        vector = await asyncio.to_thread(self._embedder.embed_passages, [document])
-        metadata = {
-            "record_kind": _VOCABULARY_RECORD_KIND,
-            "canonical_chunk_id": _VOCABULARY_RECORD_KIND,
-            "project_id": project_id,
-            "access_policy_id": f"project:{project_id}",
-            "source_id": f"vocabulary:{project_id}",
-            "source_type": "SYSTEM",
-            "provider": "INGESTION",
-            "title": "Project vocabulary",
-            "reference": f"vocabulary:{project_id}",
-            "schema_version": mapping.schema_version,
-            "embedding_model": mapping.embedding_model,
-            **{
-                key: json.dumps(value, separators=(",", ":"))
-                for key, value in vocabulary.items()
-                if isinstance(value, list)
-            },
-        }
-        await _with_retry(
-            lambda: collection.upsert(
-                ids=[_VOCABULARY_RECORD_KIND],
-                embeddings=vector,
-                documents=[document],
-                metadatas=[metadata],
-            )
-        )
+        by_policy: dict[str, list[dict[str, object]]] = {}
+        for metadata in metadatas:
+            policy = str(metadata.get("access_policy_id") or "")
+            if policy:
+                by_policy.setdefault(policy, []).append(metadata)
+        active_ids = []
+        for policy, values in sorted(by_policy.items()):
+            vocabulary = _observed_vocabulary(project_id, values)
+            document = json.dumps(vocabulary, sort_keys=True, separators=(",", ":"))
+            record_id = _VOCABULARY_RECORD_KIND if policy == f"project:{project_id}" else _VOCABULARY_RECORD_KIND + ":" + hashlib.sha256(policy.encode()).hexdigest()
+            metadata = {
+                "record_kind": _VOCABULARY_RECORD_KIND,
+                "canonical_chunk_id": _VOCABULARY_RECORD_KIND, "project_id": project_id,
+                "access_policy_id": policy, "source_id": f"vocabulary:{project_id}:{policy}",
+                "source_type": "SYSTEM", "provider": "INGESTION", "title": "Project vocabulary",
+                "reference": record_id, "schema_version": mapping.schema_version,
+                "embedding_model": mapping.embedding_model,
+            }
+            # Control metadata is fetched by ID/policy, never semantic search.
+            # A constant passage avoids truncating a growing vocabulary JSON.
+            vector = await asyncio.to_thread(self._embedder.embed_passages, ["passage: Project routing vocabulary"])
+            await _with_retry(lambda: collection.upsert(ids=[record_id], embeddings=vector, documents=[document], metadatas=[metadata]))
+            active_ids.append(record_id)
+        old = await _with_retry(lambda: collection.get(where={"$and": [{"project_id": project_id}, {"record_kind": _VOCABULARY_RECORD_KIND}]}, include=[]))
+        obsolete = sorted(set(old.get("ids") or []).difference(active_ids))
+        if obsolete:
+            await _with_retry(lambda: collection.delete(ids=obsolete))
+
 
 async def _with_retry(operation, attempts: int = 3):
     for attempt in range(attempts):
@@ -162,6 +155,7 @@ async def _with_retry(operation, attempts: int = 3):
             if not transient or attempt + 1 >= attempts:
                 raise
             await asyncio.sleep(0.25 * (2**attempt))
+
 
 def _source_filter(project_id: str, provider: str, source_id: str) -> dict[str, object]:
     return {
@@ -274,7 +268,26 @@ def _observed_vocabulary(
     # A recommendation is evidence for a human configuration decision, never a
     # runtime override. Narrow/deep corpora start with a wider page allowance.
     recommended_cap = 25 if source_count and median_chunks >= 20 else 12 if median_chunks >= 8 else 3
+    def terms():
+        result = set()
+        for metadata in metadatas:
+            if metadata.get("provider") != "JIRA":
+                continue
+            for name in ("issue_key", "status", "glossary_term", "parent_issue_key"):
+                if metadata.get(name):
+                    result.add(str(metadata[name]))
+            for name in ("labels", "components"):
+                value = metadata.get(name) or []
+                if isinstance(value, str):
+                    try:
+                        value = json.loads(value)
+                    except ValueError:
+                        value = [value]
+                if isinstance(value, list):
+                    result.update(str(v) for v in value if v)
+        return sorted(result, key=str.casefold)
     return {
+        "jira_terms": terms(),
         "record_kind": _VOCABULARY_RECORD_KIND,
         "project_id": project_id,
         "entities": observed("entity"),

@@ -34,50 +34,11 @@ class AtlassianSourceClient:
         mapping: JiraMapping,
         updated_since: datetime | None,
     ) -> AsyncIterator[SourceDocument]:
-        url = f"https://api.atlassian.com/ex/jira/{self._cloud_id}/rest/api/3/search/jql"
-        try:
-            clauses = [f'project = "{_jql(mapping.project_key)}"']
-            if updated_since:
-                clauses.append(
-                    f'updated >= "{updated_since.astimezone(UTC).strftime("%Y-%m-%d %H:%M")}"'
-                )
-            params: dict[str, str | int] = {
-                "jql": " AND ".join(clauses) + " ORDER BY updated ASC, key ASC",
-                "maxResults": self._settings.source_page_size,
-                "fields": (
-                    "summary,description,issuetype,status,priority,assignee,reporter,"
-                    "created,updated,resolutiondate,duedate,labels,components,parent,"
-                    "comment,attachment"
-                ),
-            }
-            while True:
-                response = await self._get(url, params)
-                response.raise_for_status()
-                payload = response.json()
-                issues = payload.get("issues") if isinstance(payload, dict) else None
-                if not isinstance(issues, list):
-                    raise RuntimeError("Jira returned an invalid issue-search response.")
-                for issue in issues:
-                    if not isinstance(issue, dict):
-                        continue
-                    yield _jira_issue(project_id, mapping, issue)
-                    fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
-                    attachments = fields.get("attachment")
-                    if isinstance(attachments, list):
-                        for attachment in attachments:
-                            if not isinstance(attachment, dict):
-                                continue
-                            document = await self._jira_attachment(
-                                project_id, mapping, issue, attachment
-                            )
-                            if document:
-                                yield document
-                token = payload.get("nextPageToken") if isinstance(payload, dict) else None
-                if not isinstance(token, str) or not token:
-                    break
-                params["nextPageToken"] = token
-        finally:
-            pass
+        from app.jira import JiraReader
+        reader = JiraReader(self)
+        self.jira_reader = reader
+        async for document in reader.documents(project_id, mapping, updated_since):
+            yield document
 
     async def confluence_documents(
         self,
@@ -244,7 +205,7 @@ class AtlassianSourceClient:
         download = str(attachment.get("content") or "")
         if not download:
             return None
-        response = await self._get(download)
+        response = await self._get(download, {"jira_issue_key": str(issue.get("key") or "")})
         response.raise_for_status()
         if len(response.content) > self._settings.max_attachment_bytes:
             return None

@@ -7,6 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from app.access_rules import resolve_access_policy
 from app.config import Settings
 from app.content_security import ContentSecurityScanner, QuarantinedDocument
+from app.jira_chunk_context import effective_chunker_version
 from app.models import DocumentIndexResult, SourceChunk, SourceDocument, StructuredArtifact
 from app.projects import SourceAccessRule, VectorStoreRoute
 from app.state import ManifestStore, SourceManifest
@@ -68,6 +69,9 @@ class DocumentIngestionWorkflow:
         graph.add_edge("write", "commit")
         graph.add_edge("commit", END)
         self._graph = graph.compile()
+
+    def _chunker_version(self, document: SourceDocument) -> str:
+        return effective_chunker_version(self._settings.chunker_version, document.provider)
 
     async def run(
         self,
@@ -147,7 +151,7 @@ class DocumentIngestionWorkflow:
             and manifest.version == document.version
             and manifest.content_hash == document.content_hash
             and manifest.parser_version == self._settings.parser_version
-            and manifest.chunker_version == self._settings.chunker_version
+            and manifest.chunker_version == self._chunker_version(document)
             and manifest.embedding_profile == state["vector_store"].embedding_model
             and manifest.schema_version == state["vector_store"].schema_version
             and manifest.access_policy_id == resolved_access_policy_id
@@ -185,6 +189,7 @@ class DocumentIngestionWorkflow:
         chunks = await asyncio.to_thread(
             self._chunker.chunk, state["document"], state["artifact"]
         )
+        await asyncio.to_thread(self._scanner.inspect_generated, state["document"], chunks)
         observe_document_stage(state["document"].provider, "split", began)
         return {"chunks": chunks}
 
@@ -242,7 +247,7 @@ class DocumentIngestionWorkflow:
             len(state.get("chunks", ())),
             state["scan_id"],
             parser_version=self._settings.parser_version,
-            chunker_version=self._settings.chunker_version,
+            chunker_version=self._chunker_version(state["document"]),
             embedding_profile=state["vector_store"].embedding_model,
             schema_version=state["vector_store"].schema_version,
             access_policy_id=state["resolved_access_policy_id"],

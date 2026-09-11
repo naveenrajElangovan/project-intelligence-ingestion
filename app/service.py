@@ -13,6 +13,7 @@ from app.config import Settings
 from app.control_plane import BackendControlPlaneClient
 from app.github import GitHubAppClient
 from app.models import ProviderIngestionResult, SourceDocument, SourceVisualInput
+from app.jira_run import RunContractError
 from app.visual import resolve_markdown_asset_paths
 from app.projects import IngestionProject
 from app.state import ManifestStore, SourceManifest
@@ -95,6 +96,8 @@ class IngestionService:
         if "JIRA" in requested:
             for mapping in project.jira_projects:
                 scope = f"{mapping.site_url}|{mapping.project_key}"
+                if target_collection_name:
+                    scope = f"staging:{target_collection_name}|{scope}"
                 cursor = await self._cursor(project_id, "JIRA", scope, full)
                 documents = client.jira_documents(project_id, mapping, cursor)
                 results.append(
@@ -403,6 +406,8 @@ class IngestionService:
                 elif result.operation == "DELETED":
                     deleted += 1
             except Exception as failure:
+                if isinstance(failure, RunContractError):
+                    raise
                 failed += 1
                 record_document_failure(provider, failure)
                 logger.exception(
@@ -416,10 +421,13 @@ class IngestionService:
                         f"The {provider} scope reached its document failure budget."
                     )
         if not failed:
-            if full:
+            if full and provider != "JIRA":
                 deleted += await self._delete_stale(
                     project, provider, scope, scan_id, discovered
                 )
+            # Absence from Jira search is not proof of deletion: permissions
+            # and issue security also hide records. Jira cleanup is performed
+            # only by a validated staging replacement, never an absence sweep.
             await self._manifests.save_cursor(
                 project.project_id, provider, scope, scan_started
             )

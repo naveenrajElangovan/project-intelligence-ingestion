@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from io import BytesIO
+import json
 import math
-from pathlib import Path
 import re
 import socket
+from dataclasses import dataclass
+from io import BytesIO
+from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
 from app.config import Settings
-from app.models import SourceDocument
-
+from app.jira_chunk_context import enrichment_values
+from app.models import SourceChunk, SourceDocument
+from app.source_references import ReferenceValidationError, RepositoryReferences
 
 _BLOCKED_EXTENSIONS = {
     ".7z", ".bat", ".cmd", ".com", ".dll", ".dmg", ".docm", ".exe",
@@ -22,6 +24,10 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(?:api[_-]?key|client[_-]?secret|password)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{16,}"),
     re.compile(r"\bgh[opsu]_[A-Za-z0-9]{30,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+)
+_CROSS_FIELD_SECRET_PATTERNS = tuple(
+    re.compile(pattern.pattern.replace(r"\b", ""), pattern.flags)
+    for pattern in _SECRET_PATTERNS
 )
 
 
@@ -42,6 +48,65 @@ class ContentSecurityScanner:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._references = RepositoryReferences(
+            settings.jira_reference_manifests, settings.jira_approved_reference_roots
+        )
+
+    def _sensitive(self, value: str, document: SourceDocument) -> bool:
+        if any(pattern.search(value) for pattern in _SECRET_PATTERNS):
+            return True
+        try:
+            normalized = self._references.normalize(value, document.project_id) if document.provider.upper() == "JIRA" else value
+        except ReferenceValidationError as error:
+            raise QuarantinedDocument(QuarantineReason(
+                "UNVERIFIED_SOURCE_REFERENCE", "A repository reference failed pinned provenance validation."
+            )) from error
+        return _has_high_entropy_secret(normalized)
+
+    def inspect_generated(self, document: SourceDocument, chunks: tuple[SourceChunk, ...]) -> None:
+        """Scan final Jira payloads before writes, including generated enrichment."""
+        if document.provider.upper() != "JIRA":
+            return
+        groups = [document.metadata]
+        for chunk in chunks:
+            groups.append(chunk.metadata)
+            for value in (chunk.content, chunk.embedding_text or ""):
+                if self._sensitive(value, document):
+                    self._reject_generated()
+        for metadata in groups:
+            values = list(metadata_text_values(metadata))
+            if len(values) > 8192 or sum(len(value.encode("utf-8")) for value in values) > 4_000_000:
+                raise QuarantinedDocument(QuarantineReason("METADATA_LIMIT", "Generated metadata exceeds its bounded scan limits."))
+            if any(self._sensitive(value, document) for value in values):
+                self._reject_generated()
+            canonical = json.dumps(metadata, sort_keys=True, ensure_ascii=False)
+            if any(pattern.search(canonical) for pattern in _SECRET_PATTERNS):
+                self._reject_generated()
+            if any(self._sensitive(value, document) for value in metadata_text_values(canonical)):
+                self._reject_generated()
+            # Only lists/tuples and our documented enrichment emission schema
+            # define adjacency. Unordered sibling fields are never concatenated.
+            ordered_groups = [enrichment_values(metadata), *ordered_metadata_values(metadata)]
+            for ordered in ordered_groups:
+                if any(pattern.search("".join(ordered)) for pattern in _CROSS_FIELD_SECRET_PATTERNS):
+                    self._reject_generated()
+                normalized = [_entropy_scan_text(self._references.normalize(value, document.project_id)) for value in ordered]
+                if _has_high_entropy_secret("".join(normalized)):
+                    self._reject_generated()
+                for start in range(len(normalized)):
+                    joined = ""
+                    for value in normalized[start:]:
+                        joined += value
+                        if _has_high_entropy_secret(joined):
+                            self._reject_generated()
+                        if len(joined) >= 256:
+                            break
+
+    @staticmethod
+    def _reject_generated() -> None:
+        raise QuarantinedDocument(QuarantineReason(
+            "POTENTIAL_SECRET", "Potential credential material was detected in generated content."
+        ))
 
     def inspect(self, document: SourceDocument) -> bool:
         path = str(document.metadata.get("path") or document.title)
@@ -62,10 +127,15 @@ class ContentSecurityScanner:
             sample = payload[:2_000_000].decode("utf-8", errors="ignore")
         else:
             sample = document.content[:2_000_000]
-        credential_sensitive = (
-            any(pattern.search(sample) for pattern in _SECRET_PATTERNS)
-            or _has_high_entropy_secret(sample)
-        )
+        credential_sensitive = self._sensitive(sample, document)
+        if document.provider.upper() == "JIRA":
+            # Jira retains original fields as provenance. Those values have the
+            # same security boundary as embedded text, including nested/JSON
+            # metadata; serialization punctuation is not part of a URL value.
+            credential_sensitive = credential_sensitive or any(
+                self._sensitive(value, document)
+                for value in metadata_text_values(document.metadata)
+            )
         if credential_sensitive and document.provider.upper() != "LOCAL":
             raise QuarantinedDocument(
                 QuarantineReason("POTENTIAL_SECRET", "Potential credential material was detected.")
@@ -149,9 +219,89 @@ class ContentSecurityScanner:
             raise RuntimeError("Malware scanner did not return a valid result.")
 
 
+def metadata_text_values(value, depth=0, *, include_keys=True):
+    if depth > 32:
+        raise QuarantinedDocument(
+            QuarantineReason("METADATA_TOO_DEEP", "Source metadata exceeds the nesting limit.")
+        )
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if include_keys:
+                yield str(key)
+            if include_keys and isinstance(item, (str, int, float)) and re.search(
+                r"(?i)(?:api[_-]?key|client[_-]?secret|password)$", str(key)
+            ):
+                yield f"{key}={item}"
+            yield from metadata_text_values(item, depth + 1, include_keys=include_keys)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from metadata_text_values(item, depth + 1, include_keys=include_keys)
+    elif isinstance(value, str):
+        try:
+            decoded = json.loads(value) if value.lstrip().startswith(("[", "{")) else None
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, (list, dict)):
+            yield from metadata_text_values(decoded, depth + 1, include_keys=include_keys)
+        else:
+            yield value
+
+
+def ordered_metadata_values(value, depth=0):
+    if depth > 32:
+        raise QuarantinedDocument(QuarantineReason("METADATA_TOO_DEEP", "Source metadata exceeds the nesting limit."))
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from ordered_metadata_values(item, depth + 1)
+    elif isinstance(value, (list, tuple)):
+        adjacent = []
+        for item in value:
+            try:
+                decoded = json.loads(item) if isinstance(item, str) and item.lstrip().startswith(("[", "{")) else None
+            except ValueError:
+                decoded = None
+            if isinstance(item, str) and not isinstance(decoded, (dict, list)):
+                adjacent.append(item)
+            else:
+                if adjacent:
+                    yield adjacent
+                    adjacent = []
+                yield from ordered_metadata_values(item, depth + 1)
+        if adjacent:
+            yield adjacent
+    elif isinstance(value, str):
+        try:
+            decoded = json.loads(value) if value.lstrip().startswith(("[", "{")) else None
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, (dict, list)):
+            yield from ordered_metadata_values(decoded, depth + 1)
+
+
+def _entropy_scan_text(value: str) -> str:
+    # Immutable source citations contain many ordinary path components. Combining
+    # them into one slash-delimited candidate gives misleading token entropy.
+    # Only recognize a strict, query-free citation form; scan every component and
+    # keep explicit credential matching on the original document in inspect().
+    return re.sub(
+        r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/blob/"
+        r"[0-9a-f]{40}/[A-Za-z0-9_./-]+(?:#L[0-9]+(?:-L[0-9]+)?)?"
+        r"(?=$|[\s)>\]])",
+        # Percent-encoded paths are deliberately outside this recognizer, so
+        # accepted path components are already decoded. Traversal is excluded.
+        lambda match: (
+            match.group()
+            if any(part in {".", ".."} for part in match.group().split("/"))
+            else match.group().replace("/", " ")
+        ),
+        value,
+    )
+
+
 def _has_high_entropy_secret(value: str) -> bool:
+    value = _entropy_scan_text(value)
     candidates = re.findall(r"\b[A-Za-z0-9+/=_-]{40,200}\b", value)
-    for candidate in candidates[:100]:
+    for candidate in candidates:
         counts = {character: candidate.count(character) for character in set(candidate)}
         entropy = -sum(
             (count / len(candidate)) * math.log2(count / len(candidate))

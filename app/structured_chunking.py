@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from io import BytesIO
 import hashlib
 import json
-from pathlib import Path
 import re
+from io import BytesIO
+from pathlib import Path
 from typing import Callable, Iterable
 
 from bs4 import BeautifulSoup
 from langchain_text_splitters import (
-    Language,
     HTMLSemanticPreservingSplitter,
+    Language,
     MarkdownHeaderTextSplitter,
     RecursiveCharacterTextSplitter,
     SentenceTransformersTokenTextSplitter,
@@ -19,6 +19,8 @@ from langchain_text_splitters.base import TextSplitter
 
 from app.config import Settings
 from app.format_analysis import EntityDecision, detect_category, detect_entity, detect_format
+from app.jira_chunk_context import attachment_locator
+from app.jira_chunk_context import metadata_context as jira_metadata_context
 from app.models import (
     LogicalElement,
     ParsingResult,
@@ -29,7 +31,6 @@ from app.models import (
 )
 from app.parsing import attachment_to_text
 from app.visual import analyze_docling, analyze_html, analyze_markdown
-
 
 # The embedding model has 512 positions. Anything beyond them is dropped at
 # embedding time with no error, so this is the only hard limit in the module;
@@ -159,6 +160,11 @@ class StructuredDocumentChunker:
             searchable_metadata = _searchable_metadata(document, element, normalized)
             entity = entity_decisions[ordinal]
             page_number = _locator_page(element.locator)
+            locator = (
+                attachment_locator(document, element, ordinal)
+                if document.provider == "JIRA" and document.source_type == "ATTACHMENT"
+                else element.locator
+            )
             related_assets = tuple(
                 asset
                 for asset in artifact.visual.assets
@@ -176,22 +182,24 @@ class StructuredDocumentChunker:
                 if value
             )
             embedding_text = self._fit_embedding_text(
-                required=f"passage: {context}",
+                required=f"passage: {document.reference} {locator or ''}" if document.provider == "JIRA" else f"passage: {context}",
                 optional=(
                     f"SOURCE TYPE: {document.source_type}",
                     f"REFERENCE: {document.reference}",
-                    f"LOCATION: {element.locator or 'source'}",
-                    _metadata_context(searchable_metadata),
+                    f"LOCATION: {locator or 'source'}",
+                    jira_metadata_context(searchable_metadata) if document.provider == "JIRA" else _metadata_context(searchable_metadata),
                     visual_context,
                 ),
                 body=normalized,
             )
+            if document.provider == "JIRA" and not embedding_text.endswith(normalized):
+                raise ValueError("Jira embedding would truncate source evidence")
             digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
             structure_hash = hashlib.sha256(
                 json.dumps(
                     {
                         "path": element.heading_path,
-                        "locator": element.locator,
+                        "locator": locator,
                         "metadata": element.metadata,
                     },
                     sort_keys=True,
@@ -202,6 +210,8 @@ class StructuredDocumentChunker:
                 f"{document.project_id}|{document.provider}|{document.source_id}|"
                 f"{document.version}|{ordinal}|{digest}|{self._settings.chunker_version}"
             )
+            if document.provider == "JIRA":
+                identity = f"{document.project_id}|JIRA|{document.source_id}|{locator}|{digest}|jira-v2"
             chunks.append(
                 SourceChunk(
                     chunk_id=hashlib.sha256(identity.encode("utf-8")).hexdigest(),
@@ -212,7 +222,7 @@ class StructuredDocumentChunker:
                     structure_hash=structure_hash,
                     embedding_text=embedding_text,
                     structure_path=element.heading_path,
-                    locator=element.locator,
+                    locator=locator,
                     language=language,
                     visual_eligible=bool(related_assets),
                     visual_types=tuple(sorted({asset.asset_type for asset in related_assets})),
@@ -221,6 +231,7 @@ class StructuredDocumentChunker:
                     metadata={
                         **element.metadata,
                         **searchable_metadata,
+                        **({"original_locator": element.locator or ""} if document.provider == "JIRA" and document.source_type == "ATTACHMENT" else {}),
                         "doc_category": element.metadata.get("doc_category") or category.category,
                         "entity": element.metadata.get("entity") or entity.entity,
                         "entity_key": element.metadata.get("entity_key") or entity.entity,
@@ -244,9 +255,14 @@ class StructuredDocumentChunker:
         unique_chunks: list[SourceChunk] = []
         seen_bodies: set[str] = set()
         for chunk in chunks:
-            if chunk.content_hash in seen_bodies:
+            body_identity = chunk.content_hash
+            if document.provider == "JIRA":
+                body_identity += ":" + str(chunk.metadata.get("jira_chunk_kind") or "") + ":" + str(chunk.metadata.get("event_id") or "")
+                if document.source_type == "ATTACHMENT":
+                    body_identity += ":" + str(chunk.locator)
+            if body_identity in seen_bodies:
                 continue
-            seen_bodies.add(chunk.content_hash)
+            seen_bodies.add(body_identity)
             unique_chunks.append(chunk)
         if len({chunk.chunk_id for chunk in unique_chunks}) != len(unique_chunks):
             raise ValueError(f"Duplicate chunk ids generated for {document.source_id}")
@@ -969,6 +985,17 @@ class StructuredDocumentChunker:
         return windows
 
     def _issue_values(self, document: SourceDocument):
+        sections = document.metadata.get("_jira_sections")
+        if isinstance(sections, list):
+            for section in sections:
+                kind = section["kind"]
+                maximum = min(self._settings.chunk_max_tokens, 300 if kind in {"COMMENT", "CHANGELOG", "WORKLOG", "CUSTOM_FIELD", "RELATIONSHIP"} else 420)
+                for index, value in enumerate(self._prose_windows(section["text"], maximum, self._settings.chunk_overlap_tokens)):
+                    yield value, (document.reference, kind, section["locator"]), f"{section['locator']}:{index + 1}", {
+                        "kind": "JIRA_" + kind, "jira_chunk_kind": kind,
+                        **{k: v for k, v in section.items() if k not in {"kind", "text", "locator"}},
+                    }
+            return
         parts = re.split(r"(?m)^## ([^\n]+)\n", document.content)
         context = " · ".join(
             value
@@ -1077,6 +1104,7 @@ class StructuredDocumentChunker:
                 # store. They still use the real pinned tokenizer, but do not load
                 # a second copy of the 2.2 GB transformer just to count tokens.
                 from types import SimpleNamespace
+
                 from transformers import AutoTokenizer
 
                 tokenizer = AutoTokenizer.from_pretrained(
@@ -1482,7 +1510,12 @@ def _searchable_metadata(
         "project_key": project_key,
         "symbol": symbol,
         "symbols": list(symbols),
-        "important_kwd": keywords,
+        # Jira already carries structured issue context and routing vocabulary.
+        # Synthetic keyword fragments add no source evidence and can form an
+        # artificial credential when the unchanged security scanner checks
+        # ordered metadata. Keep every original source value/body; omit only
+        # this optional, newly generated augmentation for Jira.
+        "important_kwd": [] if document.provider.upper() == "JIRA" else keywords,
         "chunk_kind": element.kind,
         "chunk_char_count": len(content),
         "chunk_token_count": len(re.findall(r"\S+", content)),

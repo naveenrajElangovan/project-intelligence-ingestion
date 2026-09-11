@@ -1,10 +1,31 @@
 import asyncio
+import random
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 
 import httpx
 
 from app.config import Settings
 from app.projects import IngestionProject, project_from_payload
+
+
+def retry_delay(value: str | None, attempt: int) -> float:
+    delay = min(30.0, 2.0 ** attempt) + random.uniform(0, 0.25)
+    if value:
+        try:
+            requested = float(value)
+        except ValueError:
+            try:
+                requested = (parsedate_to_datetime(value) - datetime.now(UTC)).total_seconds()
+            except (ValueError, TypeError):
+                requested = 0
+        # Do not retry earlier than the server permits. Long delays fail this
+        # attempt so the scheduler can retry without holding workers indefinitely.
+        if requested > 60:
+            raise RuntimeError("Atlassian rate limit requires a later scheduled retry")
+        delay = max(delay, requested)
+    return delay
 
 
 class BackendControlPlaneClient:
@@ -19,6 +40,14 @@ class BackendControlPlaneClient:
         return await self._project(
             f"/v1/internal/ingestion/projects/{quote(project_id, safe='')}"
         )
+
+    async def list_jira_projects(self) -> tuple[IngestionProject, ...]:
+        response = await self._request("/v1/internal/ingestion/projects")
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise RuntimeError("Backend returned invalid Jira project inventory")
+        return tuple(project_from_payload(value) for value in payload)
 
     async def find_by_repository(
         self, owner: str, repository: str
@@ -37,7 +66,7 @@ class BackendControlPlaneClient:
         query: list[tuple[str, str]] = [("target", target)]
         query.extend((key, str(value)) for key, value in (params or {}).items())
         path = f"/v1/internal/ingestion/projects/{quote(project_id, safe='')}/atlassian"
-        retryable_statuses = {500, 502, 503, 504}
+        retryable_statuses = {429, 500, 502, 503, 504}
         for attempt in range(3):
             try:
                 response = await self._request(path, params=query, timeout=65.0)
@@ -51,7 +80,8 @@ class BackendControlPlaneClient:
                 )
                 if not retryable or attempt == 2:
                     raise
-                await asyncio.sleep(2**attempt)
+                delay = retry_delay(error.response.headers.get("Retry-After"), attempt) if isinstance(error, httpx.HTTPStatusError) else retry_delay(None, attempt)
+                await asyncio.sleep(delay)
 
         raise RuntimeError("Atlassian backend request exhausted retries.")
 

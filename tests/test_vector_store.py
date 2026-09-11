@@ -128,6 +128,7 @@ def test_project_vocabulary_is_rebuilt_from_persisted_chunk_metadata() -> None:
             return {
                 "metadatas": [
                     {
+                        "access_policy_id": "project:DEMO",
                         "entity": "atlas",
                         "doc_category": "feature-page",
                         "provider": "CONFLUENCE",
@@ -135,6 +136,7 @@ def test_project_vocabulary_is_rebuilt_from_persisted_chunk_metadata() -> None:
                         "language": "en",
                     },
                     {
+                        "access_policy_id": "project:DEMO",
                         "entity": "nova",
                         "doc_category": "workflow",
                         "provider": "GITHUB",
@@ -162,7 +164,7 @@ def test_project_vocabulary_is_rebuilt_from_persisted_chunk_metadata() -> None:
     assert vocabulary["code_extensions"] == [".rs"]
     assert vocabulary["languages"] == ["en", "es"]
     assert collection.written["metadatas"][0]["record_kind"] == "__vocabulary__"
-    assert collection.read_where == {"project_id": "DEMO"}
+    assert collection.read_where == {"$and": [{"project_id": "DEMO"}, {"record_kind": "__vocabulary__"}]}
 
 
 def test_vocabulary_requires_five_observations_and_reports_corpus_shape() -> None:

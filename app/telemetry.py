@@ -13,6 +13,20 @@ from prometheus_client import push_to_gateway as _push_to_gateway
 
 LOGGER = logging.getLogger("project_intelligence.ingestion.telemetry")
 
+_JIRA_READS = Counter("pi_ingestion_jira_reads_total", "Jira API reads by bounded resource and outcome.", ("resource", "outcome"))
+_JIRA_READ_DURATION = Histogram("pi_ingestion_jira_read_duration_seconds", "Jira API read duration including gateway validation.", ("resource",))
+_JIRA_ITEMS = Counter("pi_ingestion_jira_source_items_total", "Collected or excluded Jira source items.", ("kind",))
+
+
+def record_jira_read(resource: str, outcome: str, seconds: float) -> None:
+    _JIRA_READS.labels(resource, outcome).inc()
+    _JIRA_READ_DURATION.labels(resource).observe(seconds)
+
+
+def record_jira_inventory(counts) -> None:
+    for kind, count in counts.items():
+        _JIRA_ITEMS.labels(kind).inc(count)
+
 
 _SCOPES = Counter(
     "pi_ingestion_scopes_total",
