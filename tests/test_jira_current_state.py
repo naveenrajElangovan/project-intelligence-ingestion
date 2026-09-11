@@ -75,6 +75,27 @@ def test_current_state_order_is_deterministic():
     )
 
 
+def test_current_state_exposes_resolution_and_stable_status_category_metadata():
+    doc = document(
+        {
+            "status": {
+                "id": "3",
+                "name": "Released",
+                "statusCategory": {"id": 3, "key": "done", "name": "Done"},
+            },
+            "resolution": {"id": "1", "name": "Fixed"},
+            "resolutiondate": "2026-09-11T10:00:00Z",
+        }
+    )
+
+    assert doc.metadata["status"] == "Released"
+    assert doc.metadata["status_category"] == "Done"
+    assert doc.metadata["status_category_key"] == "done"
+    assert doc.metadata["resolution"] == "Fixed"
+    assert doc.metadata["resolution_id"] == "1"
+    assert current(doc)["original_fields"]["status"]["statusCategory"]["key"] == "done"
+
+
 def test_oversized_original_metadata_fails_without_truncating():
     with pytest.raises(RuntimeError, match="64 KiB"):
         document({"reporter": {"displayName": "Name", "avatarUrls": {"url": "x" * 65537}}})

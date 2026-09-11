@@ -1,24 +1,25 @@
-from datetime import UTC, datetime, timedelta
-from dataclasses import replace
-import logging
 import hashlib
+import logging
 import mimetypes
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from app.atlassian import AtlassianSourceClient
 from app.access_rules import resolve_access_policy
+from app.atlassian import AtlassianSourceClient
 from app.chunking import BINARY_DOCUMENT_EXTENSIONS
 from app.config import Settings
+from app.content_security import QuarantinedDocument
 from app.control_plane import BackendControlPlaneClient
 from app.github import GitHubAppClient
-from app.models import ProviderIngestionResult, SourceDocument, SourceVisualInput
 from app.jira_run import RunContractError
-from app.visual import resolve_markdown_asset_paths
+from app.models import ProviderIngestionResult, SourceDocument, SourceVisualInput
 from app.projects import IngestionProject
 from app.state import ManifestStore, SourceManifest
+from app.telemetry import observe_scope, record_document_failure, record_document_result
+from app.visual import resolve_markdown_asset_paths
 from app.workflow import DocumentIngestionWorkflow
-from app.telemetry import observe_scope, record_document_failure
 
 logger = logging.getLogger(__name__)
 
@@ -100,19 +101,13 @@ class IngestionService:
                     scope = f"staging:{target_collection_name}|{scope}"
                 cursor = await self._cursor(project_id, "JIRA", scope, full)
                 documents = client.jira_documents(project_id, mapping, cursor)
-                results.append(
-                    await self._run_scope(project, "JIRA", scope, documents, full)
-                )
+                results.append(await self._run_scope(project, "JIRA", scope, documents, full))
         if "CONFLUENCE" in requested:
             for mapping in project.confluence_spaces:
                 scope = f"{mapping.site_url}|{mapping.space_id}"
                 cursor = await self._cursor(project_id, "CONFLUENCE", scope, full)
                 documents = client.confluence_documents(project_id, mapping, cursor)
-                results.append(
-                    await self._run_scope(
-                        project, "CONFLUENCE", scope, documents, full
-                    )
-                )
+                results.append(await self._run_scope(project, "CONFLUENCE", scope, documents, full))
         return tuple(results)
 
     async def _ingest_github(
@@ -151,9 +146,7 @@ class IngestionService:
                 asset_files = {item.path: item for item in files if item.visual_asset}
                 for item in (value for value in files if not value.visual_asset):
                     discovered += 1
-                    source_id = (
-                        f"repository:{mapping.full_name}:branch:{branch}:path:{item.path}"
-                    )
+                    source_id = f"repository:{mapping.full_name}:branch:{branch}:path:{item.path}"
                     manifest = await self._manifests.get_manifest(
                         project.project_id, "GITHUB", scope, source_id
                     )
@@ -192,7 +185,11 @@ class IngestionService:
                             if suffix in BINARY_DOCUMENT_EXTENSIONS
                             else None
                         )
-                        content = "" if content_bytes is not None else await client.blob_content(item.blob_sha)
+                        content = (
+                            ""
+                            if content_bytes is not None
+                            else await client.blob_content(item.blob_sha)
+                        )
                         if content is None and content_bytes is None:
                             raise RuntimeError("GitHub blob is not a supported document.")
                         local_visuals: list[SourceVisualInput] = []
@@ -208,7 +205,8 @@ class IngestionService:
                                     local_visuals.append(
                                         SourceVisualInput(
                                             path=path,
-                                            media_type=mimetypes.guess_type(path)[0] or "application/octet-stream",
+                                            media_type=mimetypes.guess_type(path)[0]
+                                            or "application/octet-stream",
                                             content=payload,
                                         )
                                     )
@@ -220,12 +218,13 @@ class IngestionService:
                             title=item.path,
                             reference=f"{mapping.full_name}:{branch}:{item.path}",
                             source_url=(
-                                f"https://github.com/{mapping.full_name}/blob/"
-                                f"{branch}/{item.path}"
+                                f"https://github.com/{mapping.full_name}/blob/{branch}/{item.path}"
                             ),
                             version=(
                                 hashlib.sha256(
-                                    "|".join((item.blob_sha, *sorted(linked_asset_versions))).encode()
+                                    "|".join(
+                                        (item.blob_sha, *sorted(linked_asset_versions))
+                                    ).encode()
                                 ).hexdigest()
                                 if linked_asset_versions
                                 else item.blob_sha
@@ -240,7 +239,8 @@ class IngestionService:
                                 "commit_sha": commit_sha,
                                 "file_size": item.size,
                             },
-                            mime_type=mimetypes.guess_type(item.path)[0] or "application/octet-stream",
+                            mime_type=mimetypes.guess_type(item.path)[0]
+                            or "application/octet-stream",
                             content_bytes=content_bytes,
                             local_visuals=tuple(local_visuals),
                         )
@@ -360,9 +360,7 @@ class IngestionService:
         full: bool,
     ) -> ProviderIngestionResult:
         with observe_scope(provider, full=full):
-            return await self._run_scope_documents(
-                project, provider, scope, documents, full
-            )
+            return await self._run_scope_documents(project, provider, scope, documents, full)
 
     async def _run_scope_documents(
         self,
@@ -374,7 +372,7 @@ class IngestionService:
     ) -> ProviderIngestionResult:
         scan_started = datetime.now(UTC)
         scan_id = uuid4().hex
-        discovered = indexed = unchanged = deleted = failed = chunks_written = 0
+        discovered = indexed = unchanged = deleted = failed = excluded = chunks_written = 0
         analyzed = text_only = visual_eligible = visual_assets = 0
         visual_failures = 0
         async for document in documents:
@@ -405,6 +403,15 @@ class IngestionService:
                     unchanged += 1
                 elif result.operation == "DELETED":
                     deleted += 1
+            except QuarantinedDocument as exclusion:
+                excluded += 1
+                logger.warning(
+                    "source_ingestion_excluded project_id=%s provider=%s source_id=%s reason=%s",
+                    project.project_id,
+                    provider,
+                    document.source_id,
+                    exclusion.reason.code,
+                )
             except Exception as failure:
                 if isinstance(failure, RunContractError):
                     raise
@@ -417,20 +424,14 @@ class IngestionService:
                     document.source_id,
                 )
                 if failed >= self._settings.max_document_failures_per_scope:
-                    raise RuntimeError(
-                        f"The {provider} scope reached its document failure budget."
-                    )
+                    raise RuntimeError(f"The {provider} scope reached its document failure budget.")
         if not failed:
             if full and provider != "JIRA":
-                deleted += await self._delete_stale(
-                    project, provider, scope, scan_id, discovered
-                )
+                deleted += await self._delete_stale(project, provider, scope, scan_id, discovered)
             # Absence from Jira search is not proof of deletion: permissions
             # and issue security also hide records. Jira cleanup is performed
             # only by a validated staging replacement, never an absence sweep.
-            await self._manifests.save_cursor(
-                project.project_id, provider, scope, scan_started
-            )
+            await self._manifests.save_cursor(project.project_id, provider, scope, scan_started)
             await self._refresh_project_vocabulary(project)
         return ProviderIngestionResult(
             project_id=project.project_id,
@@ -446,6 +447,7 @@ class IngestionService:
             visual_eligible_documents=visual_eligible,
             visual_assets_stored=visual_assets,
             visual_processing_failures=visual_failures,
+            excluded=excluded,
         )
 
     async def _refresh_project_vocabulary(self, project: IngestionProject) -> None:

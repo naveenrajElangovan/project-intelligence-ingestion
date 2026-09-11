@@ -33,23 +33,24 @@ async def _run() -> None:
     finally:
         push_metrics(get_settings().metrics_pushgateway_url)
     payload = [
-                {
-                    "projectId": value.project_id,
-                    "provider": value.provider,
-                    "discovered": value.discovered,
-                    "indexed": value.indexed,
-                    "unchanged": value.unchanged,
-                    "deleted": value.deleted,
-                    "failed": value.failed,
-                    "chunksWritten": value.chunks_written,
-                    "documentsAnalyzed": value.documents_analyzed,
-                    "textOnlyDocuments": value.text_only_documents,
-                    "visualEligibleDocuments": value.visual_eligible_documents,
-                    "visualAssetsStored": value.visual_assets_stored,
-                    "visualProcessingFailures": value.visual_processing_failures,
-                }
-                for value in results
-            ]
+        {
+            "projectId": value.project_id,
+            "provider": value.provider,
+            "discovered": value.discovered,
+            "indexed": value.indexed,
+            "unchanged": value.unchanged,
+            "deleted": value.deleted,
+            "failed": value.failed,
+            "excluded": value.excluded,
+            "chunksWritten": value.chunks_written,
+            "documentsAnalyzed": value.documents_analyzed,
+            "textOnlyDocuments": value.text_only_documents,
+            "visualEligibleDocuments": value.visual_eligible_documents,
+            "visualAssetsStored": value.visual_assets_stored,
+            "visualProcessingFailures": value.visual_processing_failures,
+        }
+        for value in results
+    ]
     print(json.dumps(payload, indent=2))
     if any(value.failed for value in results):
         raise SystemExit(1)

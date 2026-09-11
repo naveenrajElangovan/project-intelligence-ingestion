@@ -218,7 +218,7 @@ def test_jira_version_marker_triggers_refresh_once_and_preserves_other_provider_
         monkeypatch.setattr(workflow._chunker, "chunk", lambda *args: (chunk({}),))
         route = VectorStoreRoute("stage", "chunk_text")
         assert (await workflow.run(document(), "scope", "scan", route)).operation == "INDEXED"
-        assert manifests.value.chunker_version == settings.chunker_version + ".jira-context-v2"
+        assert manifests.value.chunker_version == settings.chunker_version + ".jira-context-v3"
         assert (await workflow.run(document(), "scope", "scan2", route)).operation == "UNCHANGED"
         manifests.value = replace(
             manifests.value, chunker_version=settings.chunker_version + ".jira-context-v1"

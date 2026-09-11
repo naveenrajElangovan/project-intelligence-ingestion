@@ -314,6 +314,12 @@ def current_state_fields(current):
             continue
         if name in named and isinstance(value, dict):
             result[name] = {key: value[key] for key in ("id", "name") if key in value}
+            if name == "status" and isinstance(value.get("statusCategory"), dict):
+                result[name]["statusCategory"] = {
+                    key: value["statusCategory"][key]
+                    for key in ("id", "key", "name")
+                    if key in value["statusCategory"]
+                }
         elif name in people and isinstance(value, dict):
             result[name] = {
                 key: value[key] for key in ("accountId", "displayName", "active") if key in value
@@ -446,12 +452,19 @@ def issue_document(project_id, mapping, cloud_id, issue, names, comments, histor
         )
         if match:
             section("GLOSSARY", f"glossary:{index}", line, glossary_term=match[1])
+    status = fields.get("status") or {}
+    status_category = status.get("statusCategory") or {}
+    resolution = fields.get("resolution") or {}
     metadata = {
         "cloud_id": cloud_id,
         "project_key": mapping.project_key,
         "issue_key": key,
         "issue_type": (fields.get("issuetype") or {}).get("name", ""),
         "status": (fields.get("status") or {}).get("name", ""),
+        "status_category": status_category.get("name", ""),
+        "status_category_key": status_category.get("key", ""),
+        "resolution": resolution.get("name", ""),
+        "resolution_id": resolution.get("id", ""),
         "priority": (fields.get("priority") or {}).get("name", ""),
         "assignee": (fields.get("assignee") or {}).get("displayName", ""),
         "reporter": (fields.get("reporter") or {}).get("displayName", ""),

@@ -18,7 +18,7 @@ ENRICHMENT_FIELDS = (
 
 
 def effective_chunker_version(base: str, provider: str) -> str:
-    return base + (".jira-context-v2" if provider == "JIRA" else "")
+    return base + (".jira-context-v3" if provider == "JIRA" else "")
 
 
 def enrichment_values(metadata: dict[str, object]) -> list[str]:

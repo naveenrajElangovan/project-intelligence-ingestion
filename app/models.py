@@ -1,6 +1,6 @@
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
-import hashlib
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +25,9 @@ class SourceDocument:
 
     @property
     def content_hash(self) -> str:
-        value = self.content_bytes if self.content_bytes is not None else self.content.encode("utf-8")
+        value = (
+            self.content_bytes if self.content_bytes is not None else self.content.encode("utf-8")
+        )
         return hashlib.sha256(value).hexdigest()
 
 
@@ -129,6 +131,7 @@ class ProviderIngestionResult:
     visual_eligible_documents: int = 0
     visual_assets_stored: int = 0
     visual_processing_failures: int = 0
+    excluded: int = 0
 
 
 @dataclass(frozen=True, slots=True)

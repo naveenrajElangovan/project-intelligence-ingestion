@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import Settings
+from app.content_security import QuarantinedDocument, QuarantineReason
 from app.models import DocumentIndexResult, SourceDocument
 from app.projects import IngestionProject, VectorStoreRoute
 from app.service import IngestionService
@@ -90,17 +91,13 @@ def test_concurrent_scope_owner_is_rejected_before_it_can_delete() -> None:
     async def scenario() -> None:
         manifests = MemoryManifestStore()
         workflow = BlockingWorkflow()
-        service = IngestionService(
-            Settings(_env_file=None), SimpleNamespace(), manifests, workflow
-        )
+        service = IngestionService(Settings(_env_file=None), SimpleNamespace(), manifests, workflow)
         first = asyncio.create_task(
             service._run_scope(_project(), "FUTURE_CONNECTOR", "scope", _documents(), True)
         )
         await workflow.started.wait()
         with pytest.raises(RuntimeError, match="already running"):
-            await service._run_scope(
-                _project(), "FUTURE_CONNECTOR", "scope", _documents(), True
-            )
+            await service._run_scope(_project(), "FUTURE_CONNECTOR", "scope", _documents(), True)
         workflow.resume.set()
         await first
         assert workflow.calls == 1
@@ -149,10 +146,46 @@ def test_scope_stops_at_document_failure_budget() -> None:
             workflow,
         )
         with pytest.raises(RuntimeError, match="failure budget"):
-            await service._run_scope(
-                _project(), "FUTURE_CONNECTOR", "scope", _documents(3), False
-            )
+            await service._run_scope(_project(), "FUTURE_CONNECTOR", "scope", _documents(3), False)
         assert workflow.calls == 2
+        assert manifests.releases == 1
+
+    asyncio.run(scenario())
+
+
+def test_quarantined_documents_are_reported_without_weakening_failure_budget() -> None:
+    class QuarantiningWorkflow:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.vocabulary_refreshes = 0
+
+        async def run(self, document, scope, scan_id, vector_store, force=False):
+            self.calls += 1
+            if document.source_id in {"source-0", "source-1"}:
+                raise QuarantinedDocument(QuarantineReason("POTENTIAL_SECRET", "excluded"))
+            return DocumentIndexResult("UNCHANGED", 0)
+
+        async def refresh_project_vocabulary(self, vector_store, project_id):
+            self.vocabulary_refreshes += 1
+
+    async def scenario() -> None:
+        manifests = MemoryManifestStore()
+        workflow = QuarantiningWorkflow()
+        service = IngestionService(
+            Settings(_env_file=None, max_document_failures_per_scope=1),
+            SimpleNamespace(),
+            manifests,
+            workflow,
+        )
+        result = await service._run_scope(
+            _project(), "FUTURE_CONNECTOR", "scope", _documents(3), False
+        )
+        assert result.discovered == 3
+        assert result.excluded == 2
+        assert result.failed == 0
+        assert result.unchanged == 1
+        assert workflow.calls == 3
+        assert workflow.vocabulary_refreshes == 1
         assert manifests.releases == 1
 
     asyncio.run(scenario())

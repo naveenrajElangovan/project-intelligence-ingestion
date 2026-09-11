@@ -1,6 +1,6 @@
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-import json
 from typing import Any
 
 import httpx
@@ -35,6 +35,7 @@ class AtlassianSourceClient:
         updated_since: datetime | None,
     ) -> AsyncIterator[SourceDocument]:
         from app.jira import JiraReader
+
         reader = JiraReader(self)
         self.jira_reader = reader
         async for document in reader.documents(project_id, mapping, updated_since):
@@ -49,9 +50,7 @@ class AtlassianSourceClient:
         origin = f"https://api.atlassian.com/ex/confluence/{self._cloud_id}"
         pages = await self._confluence_pages(origin, mapping)
         pages_by_id = {
-            str(page.get("id") or ""): page
-            for page in pages
-            if str(page.get("id") or "")
+            str(page.get("id") or ""): page for page in pages if str(page.get("id") or "")
         }
         for page in pages:
             if not _inside_v2_roots(page, mapping, pages_by_id):
@@ -63,9 +62,7 @@ class AtlassianSourceClient:
             if _on_or_after(page_updated_at, updated_since):
                 document = _confluence_page(project_id, mapping, page)
                 if not document.content.strip():
-                    document = await self._confluence_live_body(
-                        origin, project_id, mapping, page
-                    )
+                    document = await self._confluence_live_body(origin, project_id, mapping, page)
                 yield document
             if not page_id:
                 continue
@@ -241,13 +238,17 @@ class AtlassianSourceClient:
         mapping: ConfluenceMapping,
         content: dict[str, Any],
     ) -> SourceDocument | None:
-        extensions = content.get("extensions") if isinstance(content.get("extensions"), dict) else {}
+        extensions = (
+            content.get("extensions") if isinstance(content.get("extensions"), dict) else {}
+        )
         metadata = content.get("metadata") if isinstance(content.get("metadata"), dict) else {}
         size = _integer(content.get("fileSize")) or _integer(extensions.get("fileSize"))
         if size is not None and size > self._settings.max_attachment_bytes:
             return None
         title = str(content.get("title") or content.get("id") or "attachment")
-        media_type = str(metadata.get("mediaType") or content.get("mediaType") or "application/octet-stream")
+        media_type = str(
+            metadata.get("mediaType") or content.get("mediaType") or "application/octet-stream"
+        )
         links = content.get("_links") if isinstance(content.get("_links"), dict) else {}
         download = str(content.get("downloadLink") or links.get("download") or "")
         if not download:
@@ -289,15 +290,11 @@ class AtlassianSourceClient:
             content_bytes=response.content,
         )
 
-    async def _get(
-        self, target: str, params: dict[str, str | int] | None = None
-    ) -> httpx.Response:
+    async def _get(self, target: str, params: dict[str, str | int] | None = None) -> httpx.Response:
         return await self._gateway.atlassian_get(self._project_id, target, params)
 
 
-def _jira_issue(
-    project_id: str, mapping: JiraMapping, issue: dict[str, Any]
-) -> SourceDocument:
+def _jira_issue(project_id: str, mapping: JiraMapping, issue: dict[str, Any]) -> SourceDocument:
     issue_id = str(issue.get("id") or "")
     key = str(issue.get("key") or issue_id)
     fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
@@ -324,6 +321,14 @@ def _jira_issue(
         if part
     )
     updated = str(fields.get("updated") or fields.get("created") or issue_id)
+    raw_status = fields.get("status")
+    status: dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
+    raw_status_category = status.get("statusCategory")
+    status_category: dict[str, Any] = (
+        raw_status_category if isinstance(raw_status_category, dict) else {}
+    )
+    raw_resolution = fields.get("resolution")
+    resolution: dict[str, Any] = raw_resolution if isinstance(raw_resolution, dict) else {}
     return SourceDocument(
         project_id=project_id,
         provider="JIRA",
@@ -340,6 +345,10 @@ def _jira_issue(
             "issue_key": key,
             "issue_type": _nested_name(fields.get("issuetype")),
             "status": _nested_name(fields.get("status")),
+            "status_category": str(status_category.get("name") or ""),
+            "status_category_key": str(status_category.get("key") or ""),
+            "resolution": str(resolution.get("name") or ""),
+            "resolution_id": str(resolution.get("id") or ""),
             "priority": _nested_name(fields.get("priority")),
             "assignee": _nested_display_name(fields.get("assignee")),
             "reporter": _nested_display_name(fields.get("reporter")),
@@ -347,7 +356,6 @@ def _jira_issue(
             "due_date": str(fields.get("duedate") or ""),
         },
     )
-
 
 
 def _atlas_doc_text(body: dict[str, Any]) -> str:
@@ -401,16 +409,15 @@ def _adf_blocks(node: dict[str, Any]) -> list[str]:
         return rows
     if kind in {"heading", "paragraph", "listItem", "taskItem", "blockquote"}:
         inline = " ".join(
-            part
-            for child in children
-            if isinstance(child, dict)
-            for part in _adf_blocks(child)
+            part for child in children if isinstance(child, dict) for part in _adf_blocks(child)
         )
         collapsed = " ".join(inline.split())
         if not collapsed:
             return []
         if kind == "heading":
-            level = node.get("attrs", {}).get("level") if isinstance(node.get("attrs"), dict) else None
+            level = (
+                node.get("attrs", {}).get("level") if isinstance(node.get("attrs"), dict) else None
+            )
             hashes = "#" * int(level or 1)
             # Markdown heading syntax so the heading splitter can see structure,
             # which is what populates structure_path.
@@ -429,12 +436,7 @@ def _adf_blocks(node: dict[str, Any]) -> list[str]:
 
 
 def _adf_blocks_flat(children: list[Any]) -> list[str]:
-    return [
-        part
-        for child in children
-        if isinstance(child, dict)
-        for part in _adf_blocks(child)
-    ]
+    return [part for child in children if isinstance(child, dict) for part in _adf_blocks(child)]
 
 
 def _confluence_page(
@@ -465,10 +467,7 @@ def _confluence_page(
         reference=content_id,
         source_url=_confluence_url(mapping.site_url, content),
         version=str(
-            version.get("number")
-            or version.get("createdAt")
-            or version.get("when")
-            or content_id
+            version.get("number") or version.get("createdAt") or version.get("when") or content_id
         ),
         content=raw_html,
         updated_at=updated_at,
@@ -537,11 +536,7 @@ def _next_url(origin: str, payload: object) -> str | None:
 
 def _confluence_updated_at(content: dict[str, Any]) -> datetime | None:
     version = content.get("version") if isinstance(content.get("version"), dict) else {}
-    return _datetime(
-        version.get("createdAt")
-        or version.get("when")
-        or content.get("createdAt")
-    )
+    return _datetime(version.get("createdAt") or version.get("when") or content.get("createdAt"))
 
 
 def _on_or_after(value: datetime | None, threshold: datetime | None) -> bool:
@@ -575,7 +570,11 @@ def _nested_name(value: object) -> str | None:
 
 
 def _nested_display_name(value: object) -> str | None:
-    return str(value.get("displayName")) if isinstance(value, dict) and value.get("displayName") else None
+    return (
+        str(value.get("displayName"))
+        if isinstance(value, dict) and value.get("displayName")
+        else None
+    )
 
 
 def _datetime(value: object) -> datetime | None:
