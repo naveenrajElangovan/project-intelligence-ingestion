@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import Settings, get_settings
 from app.dependencies import get_ingestion_service
 from app.models import ProviderIngestionResult
-from app.service import IngestionService
+from app.service import IngestionAlreadyRunning, IngestionService
 
 router = APIRouter(prefix="/v1/projects", tags=["ingestions"])
 
@@ -17,6 +17,19 @@ class IngestionRequest(BaseModel):
         default_factory=lambda: ["GITHUB", "JIRA", "CONFLUENCE"]
     )
     full: bool = False
+
+
+class TargetedIngestionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    provider: Literal["JIRA", "CONFLUENCE"]
+    cloud_id: str = Field(alias="cloudId", min_length=1, max_length=128)
+    resource_type: str = Field(alias="resourceType", min_length=1, max_length=64)
+    resource_id: str = Field(alias="resourceId", min_length=1, max_length=128)
+    child_resource_id: str | None = Field(default=None, alias="childResourceId", min_length=1, max_length=128)
+    project_or_space_id: str = Field(alias="projectOrSpaceId", min_length=1, max_length=128)
+    event_type: str = Field(alias="eventType", min_length=1, max_length=160)
+    deleted: bool = False
+    child_deleted: bool = Field(default=False, alias="childDeleted")
 
 
 class ProviderResult(BaseModel):
@@ -60,7 +73,43 @@ async def run_ingestion(
         )
     except LookupError as error:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+    except IngestionAlreadyRunning as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
     except RuntimeError as error:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error)) from error
+
+
+@router.post(
+    "/{project_id}/ingestions/targeted",
+    response_model=ProviderResult,
+    response_model_by_alias=True,
+)
+async def run_targeted_ingestion(
+    project_id: str,
+    body: TargetedIngestionRequest,
+    request: Request,
+    internal_key: Annotated[str | None, Header(alias="X-Internal-Api-Key")] = None,
+    settings: Settings = Depends(get_settings),
+    service: IngestionService = Depends(get_ingestion_service),
+) -> ProviderIngestionResult:
+    _authorize(request, internal_key, settings)
+    try:
+        return await service.ingest_atlassian_resource(
+            project_id=project_id,
+            provider=body.provider,
+            cloud_id=body.cloud_id,
+            resource_id=body.resource_id,
+            child_resource_id=body.child_resource_id,
+            resource_type=body.resource_type,
+            project_or_space_id=body.project_or_space_id,
+            deleted=body.deleted,
+            child_deleted=body.child_deleted,
+        )
+    except LookupError as error:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
+    except IngestionAlreadyRunning as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+    except (ValueError, RuntimeError) as error:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error)) from error
 
 

@@ -34,13 +34,13 @@ class ChromaVectorStore:
         self._host, self._port, self._collection_name, self._embedder = host, port, collection_name, embedder
     def embedding_model(self):
         return self._embedder.sentence_transformer()
-    def _collection(self, project_id: str):
+    def _collection(self, project_id: str, logical_collection: str):
         from chromadb import HttpClient
         collection = HttpClient(host=self._host, port=self._port).get_or_create_collection(
-            project_collection_name(self._collection_name, project_id),
-            metadata=project_collection_metadata(self._collection_name, project_id),
+            project_collection_name(logical_collection, project_id),
+            metadata=project_collection_metadata(logical_collection, project_id),
         )
-        verify_project_collection(collection, self._collection_name, project_id)
+        verify_project_collection(collection, logical_collection, project_id)
         return collection
     async def ready(self) -> bool:
         from chromadb import HttpClient
@@ -53,30 +53,79 @@ class ChromaVectorStore:
         chunks: tuple[SourceChunk, ...],
         source_access_rules: tuple[SourceAccessRule, ...] = (),
         access_policy_id: str | None = None,
-    ) -> None:
-        if mapping.collection_name != self._collection_name:
-            raise ValueError("The project collection does not match the configured Chroma collection.")
-        collection = await _with_retry(lambda: self._collection(document.project_id))
+    ) -> int:
+        collection = await _with_retry(
+            lambda: self._collection(document.project_id, mapping.collection_name)
+        )
         where = _source_filter(document.project_id, document.provider, document.source_id)
-        prior = await _with_retry(lambda: collection.get(where=where, include=[]))
+        prior = await _with_retry(
+            lambda: collection.get(where=where, include=["metadatas"])
+        )
         prior_ids = set(prior.get("ids") or [])
         if not chunks:
             await _with_retry(lambda: collection.delete(where=where))
-            return
-        storage_ids = [hashlib.sha256(f"{chunk.chunk_id}|{document.version}".encode()).hexdigest() if document.provider == "JIRA" else _storage_id(document, chunk.ordinal) for chunk in chunks]
-        vectors = await asyncio.to_thread(self._embedder.embed_passages, [chunk.embedding_text or chunk.content for chunk in chunks])
-        await _with_retry(lambda: collection.upsert(ids=storage_ids, embeddings=vectors, documents=[chunk.content for chunk in chunks], metadatas=[_metadata(mapping, document, chunk, source_access_rules, access_policy_id=access_policy_id) for chunk in chunks]))
+            return 0
+        prior_by_canonical = {
+            str(metadata.get("canonical_chunk_id") or ""): storage_id
+            for storage_id, metadata in zip(
+                prior.get("ids") or [], prior.get("metadatas") or []
+            )
+            if isinstance(metadata, dict) and metadata.get("canonical_chunk_id")
+        }
+        storage_ids = []
+        changed_chunks = []
+        changed_ids = []
+        retained_ids = []
+        retained_metadata = []
+        for chunk in chunks:
+            if document.provider in {"JIRA", "CONFLUENCE"}:
+                storage_id = prior_by_canonical.get(chunk.chunk_id, chunk.chunk_id)
+            else:
+                storage_id = _storage_id(document, chunk.ordinal)
+            storage_ids.append(storage_id)
+            metadata = _metadata(
+                mapping, document, chunk, source_access_rules,
+                access_policy_id=access_policy_id,
+            )
+            if storage_id in prior_ids and document.provider in {"JIRA", "CONFLUENCE"}:
+                retained_ids.append(storage_id)
+                retained_metadata.append(metadata)
+            else:
+                changed_ids.append(storage_id)
+                changed_chunks.append((chunk, metadata))
+        if changed_chunks:
+            vectors = await asyncio.to_thread(
+                self._embedder.embed_passages,
+                [chunk.embedding_text or chunk.content for chunk, _ in changed_chunks],
+            )
+            await _with_retry(
+                lambda: collection.upsert(
+                    ids=changed_ids,
+                    embeddings=vectors,
+                    documents=[chunk.content for chunk, _ in changed_chunks],
+                    metadatas=[metadata for _, metadata in changed_chunks],
+                )
+            )
+        if retained_ids:
+            await _with_retry(
+                lambda: collection.update(ids=retained_ids, metadatas=retained_metadata)
+            )
         written = await _with_retry(lambda: collection.get(ids=storage_ids, include=[]))
         if len(written.get("ids") or []) != len(storage_ids):
             raise RuntimeError("Chroma did not persist the complete replacement generation.")
         obsolete = sorted(prior_ids.difference(storage_ids))
         if obsolete:
             await _with_retry(lambda: collection.delete(ids=obsolete))
+        return len(changed_ids)
     async def delete_document(self, mapping: VectorStoreRoute, project_id: str, provider: str, source_id: str) -> None:
-        collection = await _with_retry(lambda: self._collection(project_id))
+        collection = await _with_retry(
+            lambda: self._collection(project_id, mapping.collection_name)
+        )
         await _with_retry(lambda: collection.delete(where=_source_filter(project_id, provider, source_id)))
     async def delete_provider(self, mapping: VectorStoreRoute, project_id: str, provider: str) -> bool:
-        collection = await _with_retry(lambda: self._collection(project_id))
+        collection = await _with_retry(
+            lambda: self._collection(project_id, mapping.collection_name)
+        )
         await _with_retry(
             lambda: collection.delete(
                 where={"$and": [{"project_id": project_id}, {"provider": provider}]}
@@ -89,9 +138,9 @@ class ChromaVectorStore:
     ) -> None:
         """Rebuild the reserved vocabulary from persisted project metadata."""
 
-        if mapping.collection_name != self._collection_name:
-            raise ValueError("The project collection does not match the configured Chroma collection.")
-        collection = await _with_retry(lambda: self._collection(project_id))
+        collection = await _with_retry(
+            lambda: self._collection(project_id, mapping.collection_name)
+        )
         metadatas: list[dict[str, object]] = []
         offset = 0
         where = {

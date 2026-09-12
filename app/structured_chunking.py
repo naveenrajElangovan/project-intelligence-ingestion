@@ -210,8 +210,8 @@ class StructuredDocumentChunker:
                 f"{document.project_id}|{document.provider}|{document.source_id}|"
                 f"{document.version}|{ordinal}|{digest}|{self._settings.chunker_version}"
             )
-            if document.provider == "JIRA":
-                identity = f"{document.project_id}|JIRA|{document.source_id}|{locator}|{digest}|jira-v2"
+            if document.provider in {"JIRA", "CONFLUENCE"}:
+                identity = f"{document.project_id}|{document.provider}|{document.source_id}|{locator}|{digest}|atlassian-v1"
             chunks.append(
                 SourceChunk(
                     chunk_id=hashlib.sha256(identity.encode("utf-8")).hexdigest(),

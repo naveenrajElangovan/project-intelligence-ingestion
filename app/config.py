@@ -1,5 +1,6 @@
 import base64
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +16,10 @@ class Settings(BaseSettings):
     webhook_max_body_bytes: int = 2_097_152
     control_plane_url: str = "http://localhost:8001"
     control_plane_api_key: str = ""
+    atlassian_service_url: str = ""
+    atlassian_service_internal_api_key: str = ""
+    atlassian_service_primary_enabled: bool = False
+    atlassian_rest_fallback_enabled: bool = True
     github_app_id: str = ""
     github_private_key_base64: str = ""
     github_webhook_secret: str = ""
@@ -25,6 +30,10 @@ class Settings(BaseSettings):
     state_table_endpoint: str = ""
     state_table_name: str = "piingestionstate"
     state_managed_identity_client_id: str = ""
+    state_backend: Literal["AZURE_TABLE", "MONGODB"] = "AZURE_TABLE"
+    state_mongodb_url: str = "mongodb://mongodb:27017"
+    state_mongodb_database: str = "project_intelligence_ingestion"
+    state_mongodb_collection: str = "manifests"
     internal_api_key: str = ""
     incremental_overlap_minutes: int = 5
     scope_lease_seconds: int = 900

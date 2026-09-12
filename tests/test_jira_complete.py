@@ -39,9 +39,10 @@ ISSUE = {
 
 
 class Gateway:
-    def __init__(self, *, restrict=False, changing=False, fail_page=False):
+    def __init__(self, *, restrict=False, changing=False, fail_page=False, fail_remote=False):
         self.calls = []
         self.restrict, self.changing, self.fail_page = restrict, changing, fail_page
+        self.fail_remote = fail_remote
 
     async def atlassian_get(self, project, target, params=None):
         self.calls.append((target, deepcopy(params)))
@@ -85,6 +86,8 @@ class Gateway:
         elif path.endswith("/worklog"):
             data = {"worklogs": [], "total": 0}
         elif path.endswith("/remotelink"):
+            if self.fail_remote:
+                return httpx.Response(403, request=httpx.Request("GET", target))
             data = [{"id": 4, "object": {"url": "https://github.com/org/repo/pull/123"}}]
         elif path == "/attachment/content/9":
             return httpx.Response(200, content=b"evidence", request=httpx.Request("GET", target))
@@ -122,6 +125,13 @@ def test_restricted_comments_are_excluded_and_counted():
     docs, reader = asyncio.run(collect(Gateway(restrict=True)))
     assert reader.counts["comments_restricted"] == 2
     assert not any(s["kind"] == "COMMENT" for s in docs[0].metadata["_jira_sections"])
+
+
+def test_inaccessible_optional_remote_links_do_not_discard_the_issue():
+    docs, reader = asyncio.run(collect(Gateway(fail_remote=True)))
+    assert docs[0].source_id == "jira:cloud:issue:101"
+    assert reader.counts["remote_links_inaccessible"] == 1
+    assert any(value["outcome"] == "remote_links_inaccessible" for value in reader.outcomes)
 
 
 @pytest.mark.parametrize("kwargs", [{"changing": True}, {"fail_page": True}])

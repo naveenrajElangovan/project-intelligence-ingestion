@@ -1,13 +1,15 @@
 import asyncio
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-import hashlib
 from typing import Protocol
 
 from azure.core import MatchConditions
 from azure.core.credentials import TokenCredential
 from azure.data.tables import TableClient, UpdateMode
 from azure.identity import DefaultAzureCredential
+from pymongo import ASCENDING, MongoClient
+from pymongo.errors import DuplicateKeyError
 
 from app.config import Settings
 from app.models import SourceDocument
@@ -42,6 +44,10 @@ class ManifestStore(Protocol):
     async def release_scope_lease(
         self, project_id: str, provider: str, scope: str, owner: str
     ) -> None: ...
+
+    async def renew_scope_lease(
+        self, project_id: str, provider: str, scope: str, owner: str, ttl_seconds: int
+    ) -> bool: ...
 
     async def get_manifest(
         self, project_id: str, provider: str, scope: str, source_id: str
@@ -186,6 +192,35 @@ class AzureTableManifestStore:
         except Exception as error:
             if getattr(error, "status_code", None) not in {404, 412}:
                 raise
+
+    async def renew_scope_lease(
+        self, project_id: str, provider: str, scope: str, owner: str, ttl_seconds: int
+    ) -> bool:
+        partition = _partition(project_id, provider, scope)
+        try:
+            current = await asyncio.to_thread(self._table.get_entity, partition, "__lease__")
+        except Exception as error:
+            if getattr(error, "status_code", None) == 404:
+                return False
+            raise
+        if str(current.get("owner") or "") != owner:
+            return False
+        current["expires_at"] = (
+            datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+        ).isoformat()
+        try:
+            await asyncio.to_thread(
+                self._table.update_entity,
+                current,
+                mode=UpdateMode.REPLACE,
+                etag=current.metadata.get("etag"),
+                match_condition=MatchConditions.IfNotModified,
+            )
+            return True
+        except Exception as error:
+            if getattr(error, "status_code", None) in {404, 409, 412}:
+                return False
+            raise
 
     async def save_manifest(
         self,
@@ -405,6 +440,259 @@ class AzureTableManifestStore:
             return found
 
         return await asyncio.to_thread(scan)
+
+
+class MongoManifestStore:
+    """Persistent development manifest store using the stack's existing MongoDB."""
+
+    def __init__(self, url: str, database: str, collection: str) -> None:
+        if not url:
+            raise RuntimeError("PI_INGEST_STATE_MONGODB_URL is required.")
+        self._client = MongoClient(url, serverSelectionTimeoutMS=5000)
+        self._collection = self._client[database][collection]
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "MongoManifestStore":
+        return cls(
+            settings.state_mongodb_url,
+            settings.state_mongodb_database,
+            settings.state_mongodb_collection,
+        )
+
+    async def get_manifest(self, project_id, provider, scope, source_id):
+        entity = await asyncio.to_thread(
+            self._collection.find_one,
+            {"_id": self._id(project_id, provider, scope, _row(source_id))},
+        )
+        return _manifest(entity) if entity else None
+
+    async def acquire_scope_lease(self, project_id, provider, scope, owner, ttl_seconds):
+        partition = _partition(project_id, provider, scope)
+        identity = self._id(project_id, provider, scope, "__lease__")
+        now = datetime.now(UTC)
+        entity = {
+            "_id": identity,
+            "partition": partition,
+            "row": "__lease__",
+            "owner": owner,
+            "expires_at": (now + timedelta(seconds=ttl_seconds)).isoformat(),
+        }
+        try:
+            await asyncio.to_thread(self._collection.insert_one, entity)
+            return True
+        except DuplicateKeyError:
+            current = await asyncio.to_thread(self._collection.find_one, {"_id": identity})
+            if current is None or (_datetime(current.get("expires_at")) or now) > now:
+                return False
+            result = await asyncio.to_thread(
+                self._collection.replace_one,
+                {
+                    "_id": identity,
+                    "owner": current.get("owner"),
+                    "expires_at": current.get("expires_at"),
+                },
+                entity,
+            )
+            return result.modified_count == 1
+
+    async def release_scope_lease(self, project_id, provider, scope, owner):
+        await asyncio.to_thread(
+            self._collection.delete_one,
+            {
+                "_id": self._id(project_id, provider, scope, "__lease__"),
+                "owner": owner,
+            },
+        )
+
+    async def renew_scope_lease(self, project_id, provider, scope, owner, ttl_seconds):
+        result = await asyncio.to_thread(
+            self._collection.update_one,
+            {
+                "_id": self._id(project_id, provider, scope, "__lease__"),
+                "owner": owner,
+            },
+            {
+                "$set": {
+                    "expires_at": (
+                        datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+                    ).isoformat()
+                }
+            },
+        )
+        return result.modified_count == 1
+
+    async def save_manifest(
+        self,
+        document,
+        scope,
+        chunk_count,
+        scan_id,
+        *,
+        parser_version="legacy",
+        chunker_version="legacy",
+        embedding_profile="legacy",
+        schema_version="1",
+        access_policy_id="",
+    ):
+        partition = _partition(document.project_id, document.provider, scope)
+        row = _row(document.source_id)
+        entity = {
+            "_id": f"{partition}:{row}",
+            "partition": partition,
+            "row": row,
+            "project_id": document.project_id,
+            "provider": document.provider,
+            "scope": scope,
+            "source_id": document.source_id,
+            "source_type": document.source_type,
+            "title": document.title[:1000],
+            "source_url": document.source_url[:1500],
+            "version": document.version[:500],
+            "content_hash": document.content_hash,
+            "chunk_count": chunk_count,
+            "last_seen_run": scan_id,
+            "deleted": document.deleted,
+            "parser_version": parser_version,
+            "chunker_version": chunker_version,
+            "embedding_profile": embedding_profile,
+            "schema_version": schema_version,
+            "access_policy_id": access_policy_id,
+            "indexed_at": datetime.now(UTC).isoformat(),
+        }
+        await asyncio.to_thread(
+            self._collection.replace_one, {"_id": entity["_id"]}, entity, upsert=True
+        )
+
+    async def mark_deleted(self, manifest, scan_id):
+        document = SourceDocument(
+            project_id=manifest.project_id,
+            provider=manifest.provider,
+            source_id=manifest.source_id,
+            source_type=manifest.source_type,
+            title=manifest.title,
+            reference=manifest.source_id,
+            source_url=manifest.source_url,
+            version=manifest.version,
+            content="",
+            updated_at=None,
+            deleted=True,
+        )
+        await self.save_manifest(
+            document,
+            manifest.scope,
+            0,
+            scan_id,
+            parser_version=manifest.parser_version,
+            chunker_version=manifest.chunker_version,
+            embedding_profile=manifest.embedding_profile,
+            schema_version=manifest.schema_version,
+            access_policy_id=manifest.access_policy_id,
+        )
+
+    async def touch_manifest(self, manifest, scan_id):
+        await asyncio.to_thread(
+            self._collection.update_one,
+            {"_id": self._id(manifest.project_id, manifest.provider, manifest.scope, _row(manifest.source_id))},
+            {"$set": {"last_seen_run": scan_id}},
+        )
+
+    async def record_quarantine(self, document, scope, scan_id, reason_code):
+        partition = _partition(document.project_id, document.provider, scope)
+        row = "__quarantine__" + _row(document.source_id)
+        entity = {
+            "_id": f"{partition}:{row}",
+            "partition": partition,
+            "row": row,
+            "project_id": document.project_id,
+            "provider": document.provider,
+            "scope": scope,
+            "source_id": document.source_id,
+            "source_version": document.version[:500],
+            "scan_id": scan_id,
+            "reason_code": reason_code[:100],
+            "recorded_at": datetime.now(UTC).isoformat(),
+        }
+        await asyncio.to_thread(
+            self._collection.replace_one, {"_id": entity["_id"]}, entity, upsert=True
+        )
+
+    async def get_cursor(self, project_id, provider, scope):
+        entity = await asyncio.to_thread(
+            self._collection.find_one,
+            {"_id": self._id(project_id, provider, scope, "__cursor__")},
+        )
+        return _datetime(entity.get("cursor")) if entity else None
+
+    async def save_cursor(self, project_id, provider, scope, value):
+        partition = _partition(project_id, provider, scope)
+        identity = f"{partition}:__cursor__"
+        await asyncio.to_thread(
+            self._collection.replace_one,
+            {"_id": identity},
+            {
+                "_id": identity,
+                "partition": partition,
+                "row": "__cursor__",
+                "project_id": project_id,
+                "provider": provider,
+                "scope": scope,
+                "cursor": value.astimezone(UTC).isoformat(),
+            },
+            upsert=True,
+        )
+
+    async def stale_page(
+        self, project_id, provider, scope, scan_id, continuation_token, page_size=1000
+    ):
+        partition = _partition(project_id, provider, scope)
+
+        def read_page():
+            query = {"partition": partition}
+            if continuation_token:
+                query["_id"] = {"$gt": continuation_token}
+            return list(
+                self._collection.find(query).sort("_id", ASCENDING).limit(page_size + 1)
+            )
+
+        values = await asyncio.to_thread(read_page)
+        more = len(values) > page_size
+        values = values[:page_size]
+        token = str(values[-1]["_id"]) if more and values else None
+        manifests = tuple(
+            manifest
+            for entity in values
+            if not str(entity.get("row") or "").startswith("__")
+            if (manifest := _manifest(entity)).last_seen_run != scan_id
+            and not manifest.deleted
+        )
+        return manifests, token
+
+    async def purge_scope(self, project_id, provider, scope):
+        result = await asyncio.to_thread(
+            self._collection.delete_many,
+            {"partition": _partition(project_id, provider, scope)},
+        )
+        return result.deleted_count
+
+    async def scan_scopes(self, project_id):
+        values = await asyncio.to_thread(
+            lambda: list(
+                self._collection.find(
+                    {"project_id": project_id}, {"provider": 1, "scope": 1}
+                )
+            )
+        )
+        found: dict[str, set[str]] = {}
+        for entity in values:
+            provider = str(entity.get("provider") or "").upper()
+            scope = str(entity.get("scope") or "")
+            if provider and scope:
+                found.setdefault(provider, set()).add(scope)
+        return found
+
+    @staticmethod
+    def _id(project_id, provider, scope, row):
+        return f"{_partition(project_id, provider, scope)}:{row}"
 
 
 def _partition(project_id: str, provider: str, scope: str) -> str:

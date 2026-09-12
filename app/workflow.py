@@ -207,18 +207,22 @@ class DocumentIngestionWorkflow:
             observe_document_stage(document.provider, "write", began)
             return {"result": DocumentIndexResult("DELETED")}
         chunks = state.get("chunks", ())
-        await self._vectors.replace_document(
+        chunks_written = await self._vectors.replace_document(
             state["vector_store"],
             document,
             chunks,
             access_policy_id=state["resolved_access_policy_id"],
         )
+        if chunks_written is None:
+            # Compatibility with alternate/test vector stores implementing the
+            # original no-return contract.
+            chunks_written = len(chunks)
         observe_document_stage(document.provider, "write", began)
         visual = state["artifact"].visual
         return {
             "result": DocumentIndexResult(
                 "INDEXED",
-                len(chunks),
+                chunks_written,
                 visual_eligible=int(visual.eligible),
                 visual_assets=0,
                 visual_failures=0,

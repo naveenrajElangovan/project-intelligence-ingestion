@@ -47,6 +47,7 @@ class MemoryManifestStore:
         self.owner: str | None = None
         self.acquire_attempts = 0
         self.releases = 0
+        self.renewals = 0
         self.stale_calls = 0
 
     async def acquire_scope_lease(self, project_id, provider, scope, owner, ttl_seconds):
@@ -60,6 +61,10 @@ class MemoryManifestStore:
         assert self.owner == owner
         self.owner = None
         self.releases += 1
+
+    async def renew_scope_lease(self, project_id, provider, scope, owner, ttl_seconds):
+        self.renewals += 1
+        return self.owner == owner
 
     async def stale_page(self, project_id, provider, scope, scan_id, token):
         self.stale_calls += 1
@@ -105,6 +110,29 @@ def test_concurrent_scope_owner_is_rejected_before_it_can_delete() -> None:
         assert manifests.releases == 1
         assert manifests.stale_calls == 1
         assert workflow.vocabulary_refreshes == 1
+
+    asyncio.run(scenario())
+
+
+def test_long_scope_renews_its_lease_until_completion() -> None:
+    async def scenario() -> None:
+        manifests = MemoryManifestStore()
+        workflow = BlockingWorkflow()
+        service = IngestionService(
+            Settings(_env_file=None, scope_lease_seconds=3),
+            SimpleNamespace(),
+            manifests,
+            workflow,
+        )
+        run = asyncio.create_task(
+            service._run_scope(_project(), "FUTURE_CONNECTOR", "scope", _documents(), False)
+        )
+        await workflow.started.wait()
+        await asyncio.sleep(1.1)
+        assert manifests.renewals >= 1
+        workflow.resume.set()
+        await run
+        assert manifests.releases == 1
 
     asyncio.run(scenario())
 

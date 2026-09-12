@@ -41,6 +41,47 @@ class AtlassianSourceClient:
         async for document in reader.documents(project_id, mapping, updated_since):
             yield document
 
+    async def jira_resource_documents(
+        self, project_id: str, mapping: JiraMapping, issue_id: str
+    ) -> AsyncIterator[SourceDocument]:
+        from app.jira import JiraReader
+
+        for document in await JiraReader(self).resource_documents(project_id, mapping, issue_id):
+            yield document
+
+    async def confluence_resource_documents(
+        self, project_id: str, mapping: ConfluenceMapping, page_id: str
+    ) -> AsyncIterator[SourceDocument]:
+        origin = f"https://api.atlassian.com/ex/confluence/{self._cloud_id}"
+        response = await self._get(
+            f"{origin}/wiki/api/v2/pages/{page_id}",
+            {"body-format": "storage"},
+        )
+        response.raise_for_status()
+        page = response.json()
+        if not isinstance(page, dict):
+            raise RuntimeError("Confluence returned an invalid page response.")
+        space_id = str(page.get("spaceId") or (page.get("space") or {}).get("id") or "")
+        if space_id != mapping.space_id:
+            raise RuntimeError("Confluence page is outside the configured space.")
+        if mapping.root_page_ids:
+            pages = await self._confluence_pages(origin, mapping)
+            pages_by_id = {str(value.get("id") or ""): value for value in pages}
+            page = pages_by_id.get(str(page_id), page)
+            if not _inside_v2_roots(page, mapping, pages_by_id):
+                raise RuntimeError("Confluence page is outside the configured root tree.")
+        page["labels"] = await self._confluence_labels(origin, str(page_id))
+        document = _confluence_page(project_id, mapping, page)
+        if not document.content.strip():
+            document = await self._confluence_live_body(origin, project_id, mapping, page)
+        yield document
+        async for attachment in self._confluence_page_attachments(origin, str(page_id)):
+            attachment_document = await self._confluence_attachment(
+                origin, project_id, mapping, attachment
+            )
+            if attachment_document:
+                yield attachment_document
+
     async def confluence_documents(
         self,
         project_id: str,

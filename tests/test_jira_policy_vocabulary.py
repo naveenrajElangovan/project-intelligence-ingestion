@@ -44,7 +44,7 @@ def test_vocabulary_isolated_by_policy_and_unlabelled_records_are_excluded():
 
     collection = Collection()
     store = ChromaVectorStore("localhost", 8000, "test-collection", Embedder())
-    store._collection = lambda _: collection
+    store._collection = lambda _project_id, _logical_collection: collection
     asyncio.run(
         store.refresh_project_vocabulary(VectorStoreRoute("test-collection", "chunk_text"), "APP")
     )

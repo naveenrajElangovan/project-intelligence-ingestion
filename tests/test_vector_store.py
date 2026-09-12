@@ -58,8 +58,29 @@ def _chunk() -> SourceChunk:
 
 def _store(collection: FakeCollection) -> ChromaVectorStore:
     store = ChromaVectorStore("localhost", 8000, "project-intelligence", FakeEmbedder())
-    store._collection = lambda _project_id: collection
+    store._collection = lambda _project_id, _logical_collection: collection
     return store
+
+
+def test_project_route_selects_its_configured_logical_collection() -> None:
+    collection = FakeCollection()
+    store = _store(collection)
+    selected: list[tuple[str, str]] = []
+
+    def select(project_id: str, logical_collection: str):
+        selected.append((project_id, logical_collection))
+        return collection
+
+    store._collection = select
+    asyncio.run(
+        store.replace_document(
+            VectorStoreRoute("jira-stage", "chunk_text"),
+            _document(),
+            (_chunk(),),
+        )
+    )
+
+    assert selected == [("DEMO", "jira-stage")]
 
 
 def test_replacement_is_verified_before_obsolete_vectors_are_deleted() -> None:
@@ -85,6 +106,41 @@ def test_interrupted_upsert_never_deletes_existing_generation() -> None:
             )
         )
     assert collection.events == ["read-prior", "upsert"]
+
+
+def test_unchanged_jira_chunk_updates_metadata_without_reembedding() -> None:
+    class DifferentialCollection(FakeCollection):
+        def get(self, *, where=None, ids=None, include=None):
+            if ids is not None:
+                self.events.append("verify")
+                return {"ids": list(ids)}
+            self.events.append("read-prior")
+            return {
+                "ids": ["old-storage-id"],
+                "metadatas": [{"canonical_chunk_id": "chunk-1"}],
+            }
+
+        def update(self, *, ids, metadatas):
+            self.events.append("update-metadata")
+
+    collection = DifferentialCollection()
+    document = SourceDocument(
+        **{**_document().__dict__, "provider": "JIRA"}
+    ) if hasattr(_document(), "__dict__") else SourceDocument(
+        project_id="DEMO", provider="JIRA", source_id="source-1",
+        source_type="ISSUE", title="Source", reference="DEMO-1",
+        source_url="https://example.atlassian.net/browse/DEMO-1", version="2",
+        content="content", updated_at=datetime.now(UTC),
+    )
+    written = asyncio.run(
+        _store(collection).replace_document(
+            VectorStoreRoute("project-intelligence", "chunk_text"),
+            document,
+            (_chunk(),),
+        )
+    )
+    assert written == 0
+    assert collection.events == ["read-prior", "update-metadata", "verify"]
 
 
 def test_provider_delete_is_project_scoped_without_pinning_access_policy() -> None:

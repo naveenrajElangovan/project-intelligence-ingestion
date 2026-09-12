@@ -2,7 +2,7 @@
 
 Independent secure ingestion data plane for GitHub, Jira, Confluence, and structured attachments.
 It uses a sandboxed local Docling worker, structure-aware LangChain splitting, LangGraph workflow
-execution, Azure Table versioned manifests, and Chroma integrated multilingual embeddings.
+execution, persistent versioned manifests, and Chroma integrated multilingual embeddings.
 
 It does not authenticate mobile users, authorize project access, query Azure SQL directly, perform
 RAG retrieval, or call an LLM.
@@ -24,11 +24,12 @@ backend and uses its Atlassian gateway. RAG is not required for ingestion.
 
 - Backend/Azure SQL: projects, source mappings, schedules, Chroma routing, and provider connection metadata.
 - Backend/Key Vault or local encrypted store: Atlassian access and refresh tokens.
-- Ingestion/Azure Table: source versions, hashes, scan markers, leases, and delta cursors.
+- Ingestion/Azure Table in production or the existing MongoDB service in development: source
+  versions, hashes, scan markers, leases, and delta cursors.
 - Ingestion/Chroma: searchable chunks and embeddings.
 - Ingestion process memory: transient source bodies before chunking/upsert.
 
-Source bodies are never stored in Azure SQL or Azure Table. Each Chroma record contains
+Source bodies are never stored in Azure SQL, Azure Table, or MongoDB. Each Chroma record contains
 `project_id` and `access_policy_id=project:<projectId>` for RAG filtering.
 
 ## Incremental flow
@@ -36,7 +37,7 @@ Source bodies are never stored in Azure SQL or Azure Table. Each Chroma record c
 ```text
 backend project/source mapping
   -> provider cursor or GitHub tree/blob SHA
-  -> compare Azure Table manifest
+  -> compare the configured operational manifest
   -> unchanged: update scan marker and skip embedding
   -> changed/forced: security scan, Docling/structure parse, and tokenizer-aware LangChain split
   -> LangGraph write step replaces only that source in Chroma
@@ -65,8 +66,12 @@ All ingestion settings use the `PI_INGEST_` prefix. Put development values only 
 ```
 
 Infrastructure settings/secrets include backend control-plane URL/key, GitHub App identity,
-webhook secret, Chroma key, Azure Table endpoint/name/identity, size limits, cursor overlap, and
+webhook secret, Chroma key, operational-state backend, size limits, cursor overlap, and
 chunking parameters.
+
+The Docker development stack sets `PI_INGEST_STATE_BACKEND=MONGODB` and reuses its authenticated
+MongoDB container. Production defaults to `AZURE_TABLE`; no source bodies are written to either
+manifest store.
 
 Do not put project IDs, repository names, branches, Jira keys, Confluence spaces, Chroma hosts or
 namespaces, or schedules in this file. Those are returned by backend from Azure SQL.
@@ -425,3 +430,18 @@ Before enabling the recurring schedule, confirm:
 - For an incompatible embedding migration, switch to the documented prior Chroma collection rather
   than deleting the only populated namespace.
 - Run `--full` only when an intentional reconciliation or migration requires it.
+
+## Targeted Atlassian ingestion
+
+The separate `project-intelligence-atlassian` service calls the authenticated
+internal endpoint `POST /v1/projects/{projectId}/ingestions/targeted` after a
+validated Forge event. The request contains source identifiers only. Ingestion
+re-reads the authoritative Jira issue or Confluence content, compares stable
+section manifests, embeds new or changed chunks, updates unchanged metadata
+without regenerating vectors, and removes obsolete chunks only after the
+replacement set is verified.
+
+Targeted writes retain the ordinary provider cursor. Startup/five-minute
+incremental scans and daily reconciliation remain responsible for offline
+recovery and authoritative deletion detection. The full cross-service runbook is
+in `project-intelligence-rag/docs/ATLASSIAN_MCP_AND_EVENTS.md`.

@@ -195,6 +195,16 @@ class JiraReader:
             tokens.add(token)
             params["nextPageToken"] = token
 
+    async def resource_documents(self, project_id, mapping, issue_id):
+        """Hydrate one webhook-selected issue through the authoritative API."""
+        if mapping.site_url.rstrip("/") != self.client._resource_url:
+            raise ValueError("Jira mapping does not match connected Atlassian site")
+        field_payload = await self.get("/field")
+        if not isinstance(field_payload, list):
+            raise RuntimeError("Invalid Jira field catalog")
+        names = {str(field["id"]): str(field.get("name") or field["id"]) for field in field_payload}
+        return await self.issue(project_id, mapping, {"id": str(issue_id)}, names)
+
     async def issue(self, project_id, mapping, row, names):
         identity = quote(str(row["id"]), safe="")
         path = f"/issue/{identity}"
@@ -212,9 +222,24 @@ class JiraReader:
         comments = await self.pages(path + "/comment", "comments")
         history = await self.pages(path + "/changelog", "values")
         worklogs = await self.pages(path + "/worklog", "worklogs")
-        links = await self.get(path + "/remotelink")
-        if not isinstance(links, list):
-            raise RuntimeError("Invalid Jira remote links")
+        try:
+            links = await self.get(path + "/remotelink")
+            if not isinstance(links, list):
+                raise RuntimeError("Invalid Jira remote links")
+        except Exception as error:
+            # Some Jira plans or issue permissions deny remote-link reads even
+            # when the issue itself is readable. Preserve the issue and record
+            # the missing optional section instead of discarding current state,
+            # comments, changelog, and worklogs.
+            links = []
+            self.counts["remote_links_inaccessible"] += 1
+            self.outcomes.append(
+                {
+                    "issue_key": issue["key"],
+                    "outcome": "remote_links_inaccessible",
+                    "reason": type(error).__name__,
+                }
+            )
         # Detect concurrent edits rather than commit a torn snapshot.
         final = await self.get(path, {"fields": "updated"})
         if final["fields"].get("updated") != fields.get("updated"):

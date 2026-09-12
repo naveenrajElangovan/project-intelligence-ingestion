@@ -63,6 +63,16 @@ class BackendControlPlaneClient:
         target: str,
         params: dict[str, str | int] | None = None,
     ) -> httpx.Response:
+        if (
+            self._settings.atlassian_service_primary_enabled
+            and self._settings.atlassian_service_url
+            and self._settings.atlassian_service_internal_api_key
+        ):
+            try:
+                return await self._atlassian_service_read(project_id, target, params)
+            except (httpx.HTTPError, RuntimeError):
+                if not self._settings.atlassian_rest_fallback_enabled:
+                    raise
         query: list[tuple[str, str]] = [("target", target)]
         query.extend((key, str(value)) for key, value in (params or {}).items())
         path = f"/v1/internal/ingestion/projects/{quote(project_id, safe='')}/atlassian"
@@ -84,6 +94,18 @@ class BackendControlPlaneClient:
                 await asyncio.sleep(delay)
 
         raise RuntimeError("Atlassian backend request exhausted retries.")
+
+    async def _atlassian_service_read(
+        self, project_id: str, target: str, params: dict[str, str | int] | None
+    ) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=65.0) as client:
+            response = await client.post(
+                f"{self._settings.atlassian_service_url.rstrip('/')}/v1/internal/rest-read",
+                headers={"X-Internal-Api-Key": self._settings.atlassian_service_internal_api_key},
+                json={"projectId": project_id, "target": target, "params": params or {}},
+            )
+        response.raise_for_status()
+        return response
 
     async def ready(self) -> bool:
         try:
