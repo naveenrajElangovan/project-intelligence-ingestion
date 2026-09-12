@@ -1,8 +1,31 @@
 # Project Intelligence Ingestion — Current Architecture
 
+Last verified against the repository code and active development topology: 2026-09-12.
+
 This document presents the production architecture of the Project Intelligence ingestion platform. It explains how approved GitHub, Jira, Confluence, and attachment content moves from source discovery through security inspection, parsing, chunking, embedding, vector persistence, and operational state management.
 
-The architecture is built around four principles: the backend remains the authority for project mappings and Atlassian credentials; ingestion is the only writer to the retrieval corpus; vector writes complete before operational state is committed; and partial or failed scans never become evidence of deletion.
+The architecture is built around four principles: the backend remains the authority for project mappings and durable Atlassian credentials; the separate Atlassian service owns Jira and Confluence transport and events; ingestion is the only writer to the retrieval corpus; and partial or failed scans never become evidence of deletion.
+
+## 0. Responsibility boundary and active transport
+
+Ingestion is the indexing data plane. It does not own OAuth sessions, Forge signatures, Rovo MCP
+tool policy, or interactive Jira/Confluence queries. `project-intelligence-atlassian` owns those
+provider-facing concerns and gives ingestion project-qualified reads and identifier-only events.
+
+The currently active development transport is the Atlassian service with its controlled backend
+REST fallback. The Rovo MCP client and Forge bridge are implemented, but remain inactive until the
+service identity is authorized and the Forge app is registered, deployed, and installed.
+
+```mermaid
+flowchart LR
+    J["Jira / Confluence"] -->|"Forge IDs when enabled"| A["Atlassian service"]
+    A -->|"targeted project + resource"| I["Ingestion"]
+    I --> P["inspect / parse / chunk"] --> E["embed"] --> C["Chroma"]
+    I --> M["Mongo manifests, cursors, leases"]
+    B["Backend control plane"] -->|"authorized mappings"| A
+    B -->|"collection routes"| I
+    A -->|"controlled REST fallback"| B
+```
 
 ### Diagram color guide
 
@@ -46,7 +69,8 @@ flowchart TB
     end
 
     SB[("Azure Service Bus<br/>queue: pi-document-parsing")]
-    CP["Backend control plane<br/>PI_INGEST_CONTROL_PLANE_URL"]
+    CP["Backend control plane<br/>project and collection authority"]
+    ATS["Atlassian service<br/>MCP / events / REST fallback"]
     ATL["api.atlassian.com<br/>Jira + Confluence"]
     GHAPI["api.github.com"]
     TBL[("Azure Table<br/>piingestionstate")]
@@ -61,7 +85,9 @@ flowchart TB
     SB --> RW --> SVC
     RW --> VER
     SVC --> CP
-    CP -->|"token held by backend"| ATL
+    SVC --> ATS
+    ATS --> CP
+    ATS -->|"Rovo MCP or controlled fallback"| ATL
     SVC -->|"installation token"| GHAPI
     SVC --> TBL
     SVC --> CHR
@@ -72,7 +98,7 @@ flowchart TB
     classDef data fill:#059669,stroke:#059669,color:#FFFFFF,stroke-width:2px;
     class GHW,OPS entry;
     class MAIN,R1,R2,R3,R4,MW,SVC,RW,VER,ENVOFF service;
-    class CP,ATL,GHAPI external;
+    class CP,ATS,ATL,GHAPI external;
     class SB,TBL,CHR data;
 ```
 
@@ -270,9 +296,12 @@ flowchart LR
 
 **Presentation takeaway:** ingestion and retrieval share an explicit embedding contract, while runtime loading remains deterministic and offline.
 
-## 6. Atlassian — Confluence flow
+## 6. Atlassian — Confluence REST-fallback detail
 
-This sequence shows Confluence content moving through the backend-owned Atlassian proxy. Ingestion never handles Atlassian refresh tokens directly; it sends an allowlisted target to the control plane, and the backend performs the authenticated call against the configured cloud tenant.
+This sequence expands the controlled REST-fallback leg used by the Atlassian service when MCP
+cannot provide complete pagination, binary attachments, or deletion verification. Ingestion never
+handles Atlassian refresh tokens; the backend performs the authenticated call against the configured
+cloud tenant.
 
 Pages are paginated, optionally restricted to configured root-page trees, and normalized from storage HTML or Atlas Document Format. Attachments are emitted as separate versioned source documents and remain subject to the downstream size and security gates.
 
@@ -311,9 +340,11 @@ sequenceDiagram
 
 **Presentation takeaway:** the backend remains the credential boundary while ingestion owns pagination, normalization, scope filtering, and attachment discovery.
 
-## 7. Atlassian — Jira flow
+## 7. Atlassian — Jira REST-fallback detail
 
-This sequence describes incremental Jira discovery. The client builds scope-bound JQL with a five-minute overlap, requests a stable ascending order, and follows Jira’s token-based pagination rather than offset pagination.
+This sequence describes the Jira discovery behavior behind the controlled fallback. The client
+builds scope-bound JQL with a five-minute overlap, requests a stable ascending order, and follows
+Jira's token-based pagination rather than offset pagination.
 
 Each issue becomes a structured source containing summary, description, and comments. Supported attachments become independent source documents so they can be scanned, versioned, chunked, indexed, retried, or quarantined without rewriting the parent issue unnecessarily.
 
@@ -629,3 +660,51 @@ flowchart LR
 ```
 
 **Presentation takeaway:** compatibility is explicit and deterministic; no record is silently reused after a processing-contract change.
+
+## 15. Current component responsibilities
+
+| Component | Responsibility |
+|---|---|
+| `app/main.py`, `app/api/*` | Health/readiness, manual project runs, targeted Atlassian runs, and verified GitHub webhook admission |
+| `app/service.py` | Project/provider orchestration, bounded concurrency, renewable leases, retry accounting, cursor advancement, and reconciliation gates |
+| `app/control_plane.py` | Read active provider mappings and Chroma routes from the backend without database credentials |
+| `app/atlassian.py` | Call the separate Atlassian service for project-qualified source reads and targeted parents |
+| `app/jira.py`, `app/jira_run.py` | Normalize complete Jira issues, sections, comments, changelog, worklogs, relationships, custom fields, and attachments |
+| `app/github.py` | GitHub App authentication, complete tree/PR discovery, safe file selection, and source normalization |
+| `app/parsing.py`, `app/format_analysis.py`, `app/visual.py` | Text, office/PDF, table, OCR, and visual extraction within configured limits |
+| `app/content_security.py`, `app/access_rules.py` | Secret/malware/sensitive-path checks and source access-policy assignment |
+| `app/chunking.py`, `app/structured_chunking.py` | Provider-aware stable sections, token budgets, overlap, metadata, and chunk identities |
+| `app/embedding.py` | Offline pinned multilingual passage embeddings and dimension/position-limit enforcement |
+| `app/vector.py`, `app/chroma_collections.py` | Project-isolated upsert verification and removal of superseded confirmed records |
+| `app/state.py` | MongoDB or Azure Table manifests, cursors, leases, quarantine, and idempotency state |
+| `app/telemetry.py` | Content-free run, provider, retry, chunk, attachment, and latency metrics |
+
+The development Compose configuration uses MongoDB for ingestion state. Azure Table remains the
+production-compatible state adapter. Both implement the same manifest/cursor/lease contract.
+
+## 16. Targeted Atlassian update flow
+
+```mermaid
+sequenceDiagram
+    participant A as Atlassian service
+    participant API as Ingestion API
+    participant S as IngestionService
+    participant P as Parser/chunker
+    participant V as Chroma
+    participant M as State store
+    A->>API: project + provider + resource ID
+    API->>S: acquire renewable resource/scope lease
+    S->>A: authoritative parent read
+    A-->>S: resource sections + completeness
+    S->>M: load section manifests
+    S->>P: process only new/changed section versions
+    P-->>S: stable chunks + embeddings
+    S->>V: upsert and verify changed records
+    S->>V: remove confirmed missing child records
+    S->>M: commit manifests and checkpoint
+    S-->>A: indexed/unchanged/failed outcomes
+```
+
+Stable identities are cloud-qualified and section-qualified. A comment-only, history-only,
+relationship-only, attachment-only, or page-section-only change therefore leaves unrelated
+embeddings intact. A failed refresh retains the last valid indexed version and remains retryable.

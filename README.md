@@ -55,6 +55,8 @@ are incremental; `--full` is for bootstrap and reconciliation.
 - [Current ingestion architecture](docs/CURRENT_ARCHITECTURE.md)
 - [Current backend architecture](../project-intelligence-backend/docs/CURRENT_ARCHITECTURE.md)
 - [Current RAG architecture](../project-intelligence-rag/docs/CURRENT_ARCHITECTURE.md)
+- [Current Atlassian integration architecture](../project-intelligence-atlassian/docs/ARCHITECTURE.md)
+- [Current observability architecture](../project-intelligence-observability/docs/ARCHITECTURE.md)
 - [Executable ingestion labs](labs/README.md)
 
 ## Configuration ownership
