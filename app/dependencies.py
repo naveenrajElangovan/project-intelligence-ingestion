@@ -18,7 +18,9 @@ def get_project_reader() -> BackendControlPlaneClient:
 def get_vector_store() -> ChromaVectorStore:
     settings = get_settings()
     return ChromaVectorStore(
-        settings.chroma_host, settings.chroma_port, settings.chroma_collection,
+        settings.chroma_host,
+        settings.chroma_port,
+        settings.chroma_collection,
         build_passage_embedder(settings),
     )
 

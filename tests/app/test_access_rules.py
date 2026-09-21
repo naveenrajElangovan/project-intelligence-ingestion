@@ -33,15 +33,19 @@ def _rule(**changes) -> SourceAccessRule:
 
 
 def test_first_matching_rule_selects_department_policy() -> None:
-    assert resolve_access_policy(
-        (_rule(),), _document(), "project:T2.0-STORE"
-    ) == "department:T2.0-STORE:STORE_OPERATIONS"
+    assert (
+        resolve_access_policy((_rule(),), _document(), "project:T2.0-STORE")
+        == "department:T2.0-STORE:STORE_OPERATIONS"
+    )
 
 
 def test_unmatched_page_remains_project_shared() -> None:
-    assert resolve_access_policy(
-        (_rule(),), _document("Roles and safe operation"), "project:T2.0-STORE"
-    ) == "project:T2.0-STORE"
+    assert (
+        resolve_access_policy(
+            (_rule(),), _document("Roles and safe operation"), "project:T2.0-STORE"
+        )
+        == "project:T2.0-STORE"
+    )
 
 
 @pytest.mark.parametrize(

@@ -1,3 +1,5 @@
+import pytest
+
 from app.service import _github_manifest_is_unchanged
 from app.state import SourceManifest, _manifest
 
@@ -54,3 +56,21 @@ def test_legacy_table_entity_has_an_empty_policy_sentinel() -> None:
     )
 
     assert manifest.access_policy_id == ""
+
+
+def test_manifest_rejects_noncanonical_vector_schema() -> None:
+    with pytest.raises(ValueError, match="schema_version must be '3'"):
+        SourceManifest(
+            project_id="DEMO",
+            provider="GITHUB",
+            scope="repo|main",
+            source_id="source",
+            source_type="CODE",
+            title="source",
+            source_url="https://github.example/source",
+            version="blob-sha",
+            content_hash="content-hash",
+            chunk_count=1,
+            last_seen_run="scan-1",
+            schema_version="2",  # type: ignore[arg-type]
+        )

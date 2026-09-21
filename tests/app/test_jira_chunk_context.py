@@ -10,8 +10,8 @@ from app.models import LogicalElement, SourceChunk
 from app.projects import VectorStoreRoute
 from app.structured_chunking import StructuredDocumentChunker
 from app.workflow import DocumentIngestionWorkflow
-from tests.test_document_workflow import MemoryManifests, MemoryVectors
-from tests.test_jira_run_ledger import document
+from tests.app.test_document_workflow import MemoryManifests, MemoryVectors
+from tests.app.test_jira_run_ledger import document
 
 
 def attachment():

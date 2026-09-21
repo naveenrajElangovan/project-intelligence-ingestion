@@ -27,7 +27,14 @@ def test_wrong_metric_or_project_fails_closed() -> None:
     name = project_collection_name("project-intelligence", "DEMO")
     with pytest.raises(RuntimeError):
         verify_project_collection(
-            Collection(name, {"project_id": "OTHER", "logical_collection": "project-intelligence", "hnsw:space": "l2"}),
+            Collection(
+                name,
+                {
+                    "project_id": "OTHER",
+                    "logical_collection": "project-intelligence",
+                    "hnsw:space": "l2",
+                },
+            ),
             "project-intelligence",
             "DEMO",
         )
@@ -35,9 +42,17 @@ def test_wrong_metric_or_project_fails_closed() -> None:
 
 def test_reserved_tenant_metadata_cannot_be_overridden() -> None:
     document = SourceDocument(
-        project_id="DEMO", provider="LOCAL", source_id="one", source_type="CODE",
-        title="One.kt", reference="One.kt", source_url="file:///One.kt", version="1",
-        content="class One", updated_at=None, metadata={"project-id": "OTHER"},
+        project_id="DEMO",
+        provider="LOCAL",
+        source_id="one",
+        source_type="CODE",
+        title="One.kt",
+        reference="One.kt",
+        source_url="file:///One.kt",
+        version="1",
+        content="class One",
+        updated_at=None,
+        metadata={"project-id": "OTHER"},
     )
     chunk = SourceChunk("one", "one", 0, "class One", "hash")
     with pytest.raises(ValueError, match="project_id"):
@@ -46,13 +61,18 @@ def test_reserved_tenant_metadata_cannot_be_overridden() -> None:
 
 def test_filterable_structure_scalars_are_promoted() -> None:
     document = SourceDocument(
-        project_id="DEMO", provider="LOCAL", source_id="one", source_type="CODE",
-        title="One.kt", reference="One.kt", source_url="file:///One.kt", version="1",
-        content="class One", updated_at=None,
+        project_id="DEMO",
+        provider="LOCAL",
+        source_id="one",
+        source_type="CODE",
+        title="One.kt",
+        reference="One.kt",
+        source_url="file:///One.kt",
+        version="1",
+        content="class One",
+        updated_at=None,
     )
-    chunk = SourceChunk(
-        "one", "one", 0, "class One", "hash", structure_path=("Module", "One")
-    )
+    chunk = SourceChunk("one", "one", 0, "class One", "hash", structure_path=("Module", "One"))
     values = _metadata(VectorStoreRoute("project-intelligence", "chunk_text"), document, chunk)
     assert values["structure_root"] == "Module"
     assert values["structure_leaf"] == "One"

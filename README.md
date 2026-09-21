@@ -53,6 +53,7 @@ are incremental; `--full` is for bootstrap and reconciliation.
 
 - [Enterprise security, privacy, and AI data architecture](../project-intelligence-backend/PROJECT_INTELLIGENCE_SECURITY_ARCHITECTURE.md)
 - [Current ingestion architecture](docs/CURRENT_ARCHITECTURE.md)
+- [Current ingestion quality status](docs/QUALITY_STATUS.md)
 - [Current backend architecture](../project-intelligence-backend/docs/CURRENT_ARCHITECTURE.md)
 - [Current RAG architecture](../project-intelligence-rag/docs/CURRENT_ARCHITECTURE.md)
 - [Current Atlassian integration architecture](../project-intelligence-atlassian/docs/ARCHITECTURE.md)
@@ -446,4 +447,4 @@ replacement set is verified.
 Targeted writes retain the ordinary provider cursor. Startup/five-minute
 incremental scans and daily reconciliation remain responsible for offline
 recovery and authoritative deletion detection. The full cross-service runbook is
-in `project-intelligence-rag/docs/ATLASSIAN_MCP_AND_EVENTS.md`.
+in `project-intelligence-rag/docs/CURRENT_ARCHITECTURE.md`.

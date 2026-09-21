@@ -38,26 +38,27 @@ def test_entity_section_is_one_chunk_with_identity_metadata() -> None:
 
 
 def test_oversized_field_table_repeats_heading_and_header() -> None:
-    rows = "\n".join(f"| field_{index} | String with detailed value {index} |" for index in range(30))
+    rows = "\n".join(
+        f"| field_{index} | String with detailed value {index} |" for index in range(30)
+    )
     chunks = StructuredDocumentChunker(
         Settings(_env_file=None, chunk_max_tokens=70, chunk_overlap_tokens=0)
     ).split(
-        _document(
-            "### `POS_LOGIN` — id 101, version 0.3\n"
-            "| Field | Type |\n|---|---|\n" + rows
-        )
+        _document("### `POS_LOGIN` — id 101, version 0.3\n| Field | Type |\n|---|---|\n" + rows)
     )
 
     assert len(chunks) > 1
-    assert all(chunk.content.startswith("### `POS_LOGIN` — id 101, version 0.3\n| Field | Type |") for chunk in chunks)
+    assert all(
+        chunk.content.startswith("### `POS_LOGIN` — id 101, version 0.3\n| Field | Type |")
+        for chunk in chunks
+    )
     assert all(chunk.metadata["entity_key"] == "POS_LOGIN" for chunk in chunks)
 
 
 def test_entity_profile_accepts_confluence_html_headings() -> None:
     chunks = StructuredDocumentChunker(Settings(_env_file=None)).split(
         _document(
-            "<h3><code>POS_LOGIN</code> — id 101, version 0.3</h3>"
-            "<p>POS login activity.</p>",
+            "<h3><code>POS_LOGIN</code> — id 101, version 0.3</h3><p>POS login activity.</p>",
             mime_type="text/html",
         )
     )

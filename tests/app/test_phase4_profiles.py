@@ -7,9 +7,18 @@ from app.structured_chunking import StructuredDocumentChunker
 
 def _document(title: str, content: str) -> SourceDocument:
     return SourceDocument(
-        project_id="DEMO", provider="FUTURE", source_id=title, source_type="FUTURE",
-        title=title, reference=title, source_url="https://example.invalid", version="1",
-        content=content, updated_at=None, metadata={}, mime_type="text/markdown",
+        project_id="DEMO",
+        provider="FUTURE",
+        source_id=title,
+        source_type="FUTURE",
+        title=title,
+        reference=title,
+        source_url="https://example.invalid",
+        version="1",
+        content=content,
+        updated_at=None,
+        metadata={},
+        mime_type="text/markdown",
     )
 
 
@@ -17,19 +26,32 @@ def test_registry_profile_repeats_header_and_synthesizes_keys() -> None:
     rows = "\n".join(f"| EVENT_{index} | {100 + index} | 1.0 |" for index in range(20))
     chunks = StructuredDocumentChunker(
         Settings(_env_file=None, table_chunk_max_tokens=55, chunk_overlap_tokens=0)
-    ).split(_document("Large registry table", "## Events\n| Key | Id | Version |\n|---|---|---|\n" + rows))
+    ).split(
+        _document(
+            "Large registry table", "## Events\n| Key | Id | Version |\n|---|---|---|\n" + rows
+        )
+    )
 
-    table_chunks = [chunk for chunk in chunks if chunk.metadata["chunk_profile"] == "registry-table"]
-    key_chunks = [chunk for chunk in chunks if chunk.metadata["chunk_profile"] == "registry-key-list"]
+    table_chunks = [
+        chunk for chunk in chunks if chunk.metadata["chunk_profile"] == "registry-table"
+    ]
+    key_chunks = [
+        chunk for chunk in chunks if chunk.metadata["chunk_profile"] == "registry-key-list"
+    ]
     assert len(table_chunks) > 1
-    assert all(chunk.content.startswith("| Key | Id | Version |\n|---|---|---|") for chunk in table_chunks)
+    assert all(
+        chunk.content.startswith("| Key | Id | Version |\n|---|---|---|") for chunk in table_chunks
+    )
     assert key_chunks and "EVENT_0" in key_chunks[0].content
     assert all(chunk.metadata["row_keys"] for chunk in table_chunks)
 
 
 def test_workflow_profile_keeps_numbered_sequence_atomic() -> None:
     chunks = StructuredDocumentChunker(Settings(_env_file=None)).split(
-        _document("BOT-RAG-02 Business Workflows", "## [BOTFLOW-050] Close shift\n1. Count cash.\n2. Confirm.\n3. Publish event.")
+        _document(
+            "BOT-RAG-02 Business Workflows",
+            "## [BOTFLOW-050] Close shift\n1. Count cash.\n2. Confirm.\n3. Publish event.",
+        )
     )
     assert len(chunks) == 1
     assert chunks[0].metadata["flow_id"] == "BOTFLOW-050"
@@ -67,14 +89,19 @@ def test_oversized_workflow_splits_at_subsections_and_repeats_identity() -> None
 
 def test_glossary_profile_emits_one_term_per_chunk() -> None:
     chunks = StructuredDocumentChunker(Settings(_env_file=None)).split(
-        _document("Operations Glossary", "## Folio\nA transaction identifier.\n## Relief\nA cash movement.")
+        _document(
+            "Operations Glossary",
+            "## Folio\nA transaction identifier.\n## Relief\nA cash movement.",
+        )
     )
     assert [chunk.metadata["term"] for chunk in chunks] == ["Folio", "Relief"]
     assert all(len(chunk.structure_path) == 1 for chunk in chunks)
 
 
 def test_index_profile_is_small_and_explicit() -> None:
-    content = "# Master Index\n" + "\n".join(f"Section {index}: description" for index in range(150))
+    content = "# Master Index\n" + "\n".join(
+        f"Section {index}: description" for index in range(150)
+    )
     chunks = StructuredDocumentChunker(Settings(_env_file=None)).split(
         _document("Project Corpus Guide and Master Index", content)
     )

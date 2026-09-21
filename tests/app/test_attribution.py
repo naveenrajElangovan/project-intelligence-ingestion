@@ -13,7 +13,9 @@ from app.models import SourceDocument
 from app.structured_chunking import StructuredDocumentChunker
 
 
-def _document(content: str, mime_type: str, title: str = "POS-RAG-04 Data and Events") -> SourceDocument:
+def _document(
+    content: str, mime_type: str, title: str = "POS-RAG-04 Data and Events"
+) -> SourceDocument:
     return SourceDocument(
         project_id="DEMO",
         provider="CONFLUENCE",

@@ -51,9 +51,7 @@ async def _fetch_page(
 
     document = _confluence_page(project.project_id, mapping, payload)
     if not document.content.strip():
-        document = await client._confluence_live_body(
-            origin, project.project_id, mapping, payload
-        )
+        document = await client._confluence_live_body(origin, project.project_id, mapping, payload)
     body = document.content.strip()
     if not body:
         raise RuntimeError("Confluence page has an empty body.")
@@ -80,9 +78,7 @@ async def verify_refetch(project_id: str, provider: str) -> tuple[FetchedPage, .
         raise RuntimeError(f"Project {project_id} has no Confluence space mapping.")
 
     configured_ids = [
-        page_id
-        for mapping in project.confluence_spaces
-        for page_id in mapping.root_page_ids
+        page_id for mapping in project.confluence_spaces for page_id in mapping.root_page_ids
     ]
     if not configured_ids:
         raise RuntimeError(f"Project {project_id} has no configured Confluence rootPageIds.")
@@ -108,10 +104,7 @@ async def verify_refetch(project_id: str, provider: str) -> tuple[FetchedPage, .
                 fetched.append(page)
 
     for page in fetched:
-        print(
-            f"pageId={page.page_id} title={page.title!r} "
-            f"bodyLength={page.body_length}"
-        )
+        print(f"pageId={page.page_id} title={page.title!r} bodyLength={page.body_length}")
     print(
         f"refetch project={project.project_id} provider=CONFLUENCE "
         f"configuredPages={len(configured_ids)} fetchedPages={len(fetched)}"
@@ -120,8 +113,7 @@ async def verify_refetch(project_id: str, provider: str) -> tuple[FetchedPage, .
     if failures:
         failure_lines = "\n".join(f"  - {failure}" for failure in failures)
         raise RuntimeError(
-            f"Confluence refetch verification failed for {len(failures)} page(s):\n"
-            f"{failure_lines}"
+            f"Confluence refetch verification failed for {len(failures)} page(s):\n{failure_lines}"
         )
     if len(fetched) != len(configured_ids):
         raise RuntimeError(

@@ -8,13 +8,12 @@ no test would catch.
 
 from __future__ import annotations
 
-import threading
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
 from app.config import Settings
-
 
 _PASSAGE_PREFIX = "passage: "
 _PASSAGE_PREFIX_PATTERN = re.compile(r"^(?:\s*passage:\s*)+", re.IGNORECASE)

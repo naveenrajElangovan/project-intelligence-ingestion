@@ -11,7 +11,7 @@ from app.projects import IngestionProject, project_from_payload
 
 
 def retry_delay(value: str | None, attempt: int) -> float:
-    delay = min(30.0, 2.0 ** attempt) + random.uniform(0, 0.25)
+    delay = min(30.0, 2.0**attempt) + random.uniform(0, 0.25)
     if value:
         try:
             requested = float(value)
@@ -37,9 +37,7 @@ class BackendControlPlaneClient:
         self._http_client = http_client
 
     async def get(self, project_id: str) -> IngestionProject | None:
-        return await self._project(
-            f"/v1/internal/ingestion/projects/{quote(project_id, safe='')}"
-        )
+        return await self._project(f"/v1/internal/ingestion/projects/{quote(project_id, safe='')}")
 
     async def list_jira_projects(self) -> tuple[IngestionProject, ...]:
         response = await self._request("/v1/internal/ingestion/projects")
@@ -49,9 +47,7 @@ class BackendControlPlaneClient:
             raise RuntimeError("Backend returned invalid Jira project inventory")
         return tuple(project_from_payload(value) for value in payload)
 
-    async def find_by_repository(
-        self, owner: str, repository: str
-    ) -> IngestionProject | None:
+    async def find_by_repository(self, owner: str, repository: str) -> IngestionProject | None:
         return await self._project(
             "/v1/internal/ingestion/github-project",
             params={"owner": owner, "repository": repository},
@@ -90,7 +86,11 @@ class BackendControlPlaneClient:
                 )
                 if not retryable or attempt == 2:
                     raise
-                delay = retry_delay(error.response.headers.get("Retry-After"), attempt) if isinstance(error, httpx.HTTPStatusError) else retry_delay(None, attempt)
+                delay = (
+                    retry_delay(error.response.headers.get("Retry-After"), attempt)
+                    if isinstance(error, httpx.HTTPStatusError)
+                    else retry_delay(None, attempt)
+                )
                 await asyncio.sleep(delay)
 
         raise RuntimeError("Atlassian backend request exhausted retries.")

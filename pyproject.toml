@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.27,<2"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,38 +8,43 @@ version = "0.1.0"
 description = "Independent provider ingestion and Chroma indexing service"
 requires-python = ">=3.12"
 dependencies = [
-  "cryptography>=50,<51",
-  "fastapi>=0.116,<1",
-  "httpx>=0.28,<1",
-  "chromadb>=1.5,<2",
-  "pyjwt[crypto]>=2.10,<3",
-  "pydantic-settings>=2.10,<3",
-  "pymongo>=4.17,<5",
-  "prometheus-client>=0.26,<1",
-  "azure-identity>=1.24,<2",
-  "azure-data-tables>=12.7,<13",
-  "beautifulsoup4>=4.13,<5",
-  "langchain-core>=1.0,<2",
-  "langchain-text-splitters>=1.0,<2",
-  "langgraph>=1.0,<2",
-  "pypdf>=6,<7",
-  "uvicorn[standard]>=0.35,<1",
+  "azure-core==1.41.0",
+  "azure-data-tables==12.7.0",
+  "azure-identity==1.24.0",
+  "beautifulsoup4==4.15.0",
+  "chromadb==1.5.2",
+  "fastapi==0.141.1",
+  "huggingface-hub==1.27.0",
+  "httpx==0.28.1",
+  "langchain-text-splitters==1.1.2",
+  "langgraph==1.2.11",
+  "pillow==12.3.0",
+  "prometheus-client==0.26.0",
+  "pydantic==2.13.4",
+  "pydantic-settings==2.15.0",
+  "pyjwt[crypto]==2.13.0",
+  "pymongo==4.17.0",
+  "pypdf==6.16.1",
+  "sentence-transformers==5.7.0",
+  "starlette==1.6.0",
+  "uvicorn[standard]==0.52.3",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "coverage[toml]>=7.10,<8",
-  "import-linter>=2.4,<3",
-  "mypy>=1.17,<2",
-  "pre-commit>=4.3,<5",
-  "pytest>=8.4,<9",
-  "pytest-cov>=6,<7",
-  "ruff>=0.12,<1",
+  "coverage[toml]==7.16.0",
+  "deptry==0.25.1",
+  "import-linter==2.15",
+  "mypy==1.20.2",
+  "pre-commit==4.6.2",
+  "pytest==8.4.2",
+  "pytest-cov==6.3.0",
+  "ruff==0.16.6",
 ]
 worker = [
   "azure-servicebus==7.14.3",
   "docling==2.120.1",
-  "sentence-transformers==5.7.0",
+  "docling-core==2.91.0",
   "transformers==5.8.1",
 ]
 
@@ -61,6 +66,7 @@ select = ["E4", "E7", "E9", "F", "I"]
 [tool.mypy]
 files = ["app"]
 python_version = "3.12"
+plugins = ["pydantic.mypy"]
 show_error_codes = true
 warn_unused_configs = true
 

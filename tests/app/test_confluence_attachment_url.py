@@ -10,7 +10,6 @@ import pytest
 
 from app.atlassian import _confluence_absolute, _next_url
 
-
 CLOUD = "66666666-6666-4666-8666-666666666666"
 ORIGIN = f"https://api.atlassian.com/ex/confluence/{CLOUD}"
 

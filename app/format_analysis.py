@@ -16,10 +16,9 @@ rather than guessed at.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import re
-
+from dataclasses import dataclass
 
 # Enough lines to see structure, few enough to stay cheap on a large attachment.
 SAMPLE_LINES = 200
@@ -116,9 +115,7 @@ def detect_format(content: str, *, declared: str | None = None) -> FormatDecisio
     return FormatDecision("prose", "no structural markers found")
 
 
-def detect_category(
-    title: str, content: str, *, labels: tuple[str, ...] = ()
-) -> CategoryDecision:
+def detect_category(title: str, content: str, *, labels: tuple[str, ...] = ()) -> CategoryDecision:
     """Classify document semantics and always retain the decision evidence."""
 
     normalized_labels = {label.strip().casefold() for label in labels if label.strip()}
@@ -180,8 +177,22 @@ def detect_entity(
 
 
 _ENTITY_STOP_WORDS = {
-    "about", "api", "credit", "event", "final", "funds", "http", "items",
-    "json", "local", "login", "master", "not", "project", "sql", "example",
+    "about",
+    "api",
+    "credit",
+    "event",
+    "final",
+    "funds",
+    "http",
+    "items",
+    "json",
+    "local",
+    "login",
+    "master",
+    "not",
+    "project",
+    "sql",
+    "example",
     "workflow",
 }
 

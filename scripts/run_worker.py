@@ -26,7 +26,9 @@ async def _run() -> None:
     try:
         from azure.servicebus.aio import ServiceBusClient
     except ImportError as error:
-        raise SystemExit("Install requirements-worker.txt before starting the worker.") from error
+        raise SystemExit(
+            "Install the project worker extra with `pip install '.[worker]'`."
+        ) from error
 
     credential = DefaultAzureCredential(
         exclude_interactive_browser_credential=True,
@@ -65,9 +67,7 @@ async def _run() -> None:
             async for message in receiver:
                 active.add(asyncio.create_task(process(message)))
                 if len(active) >= settings.docling_max_concurrency:
-                    done, active = await asyncio.wait(
-                        active, return_when=asyncio.FIRST_COMPLETED
-                    )
+                    done, active = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
                     for task in done:
                         task.result()
             if active:

@@ -36,7 +36,9 @@ def _repository(root: Path) -> Path:
 
 
 def test_only_reviewable_source_is_discovered(tmp_path):
-    found = sorted(item.relative_path for item in _iter_files(_repository(tmp_path), DEFAULT_EXCLUDE))
+    found = sorted(
+        item.relative_path for item in _iter_files(_repository(tmp_path), DEFAULT_EXCLUDE)
+    )
 
     assert found == ["src/main/kotlin/Cart.kt", "src/main/kotlin/Shift.kt"]
 
@@ -65,7 +67,9 @@ def test_the_version_is_the_content_hash_so_unchanged_files_skip(tmp_path):
     root = _repository(tmp_path)
     relative = "src/main/kotlin/Cart.kt"
 
-    item = next(entry for entry in _iter_files(root, DEFAULT_EXCLUDE) if entry.relative_path == relative)
+    item = next(
+        entry for entry in _iter_files(root, DEFAULT_EXCLUDE) if entry.relative_path == relative
+    )
 
     assert item.digest == hashlib.sha256((root / relative).read_bytes()).hexdigest()
 

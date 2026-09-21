@@ -7,8 +7,6 @@ window exceeds the embedder's 512 positions unless one indivisible row does --
 in which case it is split by column, not truncated.
 """
 
-import pytest
-
 from app.config import Settings
 from app.structured_chunking import (
     _EMBEDDER_POSITION_LIMIT,

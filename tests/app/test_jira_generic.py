@@ -8,7 +8,7 @@ from app.atlassian import AtlassianSourceClient
 from app.config import Settings
 from app.jira import JiraReader, issue_document
 from app.projects import JiraMapping
-from tests.test_jira_complete import ISSUE, Gateway
+from tests.app.test_jira_complete import ISSUE, Gateway
 
 
 @pytest.mark.parametrize(

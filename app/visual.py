@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from io import BytesIO
 import hashlib
 import posixpath
 import re
-from typing import Iterable
+from io import BytesIO
+from typing import Any, Iterable, cast
+
 from bs4 import BeautifulSoup
 
 from app.config import Settings
 from app.models import SourceDocument, VisualAnalysis, VisualAsset
-
 
 _MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 _HTML_IMAGE = re.compile(r"<img\b[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"]", re.I)
@@ -121,7 +121,11 @@ def resolve_markdown_asset_paths(value: str, markdown_path: str) -> tuple[str, .
         if _unsafe_target(normalized):
             continue
         path = posixpath.normpath(posixpath.join(base, normalized))
-        if path.startswith("../") or path == ".." or posixpath.splitext(path)[1].lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        if (
+            path.startswith("../")
+            or path == ".."
+            or posixpath.splitext(path)[1].lower() not in {".png", ".jpg", ".jpeg", ".webp"}
+        ):
             continue
         resolved.append(path)
     return tuple(dict.fromkeys(resolved))
@@ -140,7 +144,8 @@ def analyze_docling(
     except ImportError:
         return VisualAnalysis(False, reason_codes=("DOCLING_VISUAL_TYPES_UNAVAILABLE",))
 
-    for item, _level in dl_document.iterate_items(traverse_pictures=True):
+    docling_document = cast(Any, dl_document)
+    for item, _level in docling_document.iterate_items(traverse_pictures=True):
         if len(assets) >= settings.visual_max_assets_per_document:
             reasons.append("VISUAL_ASSET_LIMIT_REACHED")
             break
@@ -153,7 +158,7 @@ def analyze_docling(
         if page is not None and page > settings.visual_max_pages_per_document:
             reasons.append("VISUAL_PAGE_LIMIT_REACHED")
             continue
-        image = item.get_image(dl_document)
+        image = item.get_image(docling_document)
         if image is None or not _meaningful_image(image, settings.visual_min_area_pixels):
             continue
         payload = BytesIO()
@@ -206,10 +211,14 @@ def analyze_html(document: SourceDocument, settings: Settings) -> VisualAnalysis
     if soup.find("img") is not None:
         visual_types.add("image")
         reasons.append("HTML_IMAGE_REQUIRES_PROVIDER_RESOLUTION")
-    for macro in soup.find_all(lambda tag: getattr(tag, "name", "") in {"ac:structured-macro", "structured-macro"}):
+    for macro in soup.find_all(
+        lambda tag: getattr(tag, "name", "") in {"ac:structured-macro", "structured-macro"}
+    ):
         name = str(macro.attrs.get("ac:name") or macro.attrs.get("name") or "").lower()
         if name == "mermaid":
-            asset = _render_mermaid_asset(document, macro.get_text("\n", strip=True), len(assets) + 1)
+            asset = _render_mermaid_asset(
+                document, macro.get_text("\n", strip=True), len(assets) + 1
+            )
             if asset:
                 assets.append(asset)
                 visual_types.add("architecture_diagram")
@@ -295,7 +304,9 @@ def _render_text_asset(
     width = min(1800, max(640, max(len(line) for line in lines) * 8 + 40))
     height = min(2400, max(180, len(lines) * 18 + 40))
     image = Image.new("RGB", (width, height), "white")
-    ImageDraw.Draw(image).multiline_text((20, 20), "\n".join(lines), fill="black", font=font, spacing=4)
+    ImageDraw.Draw(image).multiline_text(
+        (20, 20), "\n".join(lines), fill="black", font=font, spacing=4
+    )
     output = BytesIO()
     image.save(output, format="WEBP", quality=90, method=6)
     content = output.getvalue()
@@ -312,9 +323,7 @@ def _render_text_asset(
     )
 
 
-def _render_mermaid_asset(
-    document: SourceDocument, value: str, ordinal: int
-) -> VisualAsset | None:
+def _render_mermaid_asset(document: SourceDocument, value: str, ordinal: int) -> VisualAsset | None:
     """Render a safe flowchart subset without executing Mermaid or browser code."""
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -343,7 +352,9 @@ def _render_mermaid_asset(
         x = 60 if vertical else 40 + index * (box_w + gap)
         y = 40 + index * (box_h + gap) if vertical else 80
         positions[identity] = (x, y, x + box_w, y + box_h)
-        draw.rounded_rectangle(positions[identity], radius=12, fill="#EAF2FF", outline="#2457A6", width=3)
+        draw.rounded_rectangle(
+            positions[identity], radius=12, fill="#EAF2FF", outline="#2457A6", width=3
+        )
         draw.text((x + 14, y + 27), labels[identity], fill="#102A43", font=font)
     for left, _left_label, right, _right_label in edges[:30]:
         if left not in positions or right not in positions:
@@ -353,9 +364,15 @@ def _render_mermaid_asset(
         end = ((b[0] + b[2]) // 2, b[1]) if vertical else (b[0], (b[1] + b[3]) // 2)
         draw.line((start, end), fill="#52606D", width=4)
         if vertical:
-            draw.polygon(((end[0], end[1]), (end[0] - 7, end[1] - 12), (end[0] + 7, end[1] - 12)), fill="#52606D")
+            draw.polygon(
+                ((end[0], end[1]), (end[0] - 7, end[1] - 12), (end[0] + 7, end[1] - 12)),
+                fill="#52606D",
+            )
         else:
-            draw.polygon(((end[0], end[1]), (end[0] - 12, end[1] - 7), (end[0] - 12, end[1] + 7)), fill="#52606D")
+            draw.polygon(
+                ((end[0], end[1]), (end[0] - 12, end[1] - 7), (end[0] - 12, end[1] + 7)),
+                fill="#52606D",
+            )
     output = BytesIO()
     image.save(output, format="WEBP", quality=90, method=6)
     content = output.getvalue()
@@ -372,9 +389,7 @@ def _render_mermaid_asset(
     )
 
 
-def _asset_id(
-    document: SourceDocument, page: int | None, ordinal: int, content: bytes
-) -> str:
+def _asset_id(document: SourceDocument, page: int | None, ordinal: int, content: bytes) -> str:
     parts: Iterable[str] = (
         hashlib.sha256(document.source_id.encode()).hexdigest()[:24],
         hashlib.sha256(document.version.encode()).hexdigest()[:24],

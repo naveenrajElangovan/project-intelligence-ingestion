@@ -2,10 +2,9 @@
 
 import argparse
 import asyncio
-from pathlib import Path
 
-from app.config import get_settings
 from app.chroma_collections import project_collection_name, verify_project_collection
+from app.config import get_settings
 from app.control_plane import BackendControlPlaneClient
 from app.github import GitHubAppClient
 from app.state import AzureTableManifestStore
@@ -31,7 +30,9 @@ async def _github() -> None:
     mapping = project.repositories[0]
     branch = mapping.indexed_branches[0]
     commit, files = await GitHubAppClient(settings, mapping).repository_files(branch)
-    print(f"github=ok branch={branch} commit={commit[:12]} indexable_files={sum(not item.visual_asset for item in files)}")
+    print(
+        f"github=ok branch={branch} commit={commit[:12]} indexable_files={sum(not item.visual_asset for item in files)}"
+    )
 
 
 async def _table() -> None:
@@ -48,6 +49,7 @@ async def _chroma() -> None:
     settings = get_settings()
     project = await _project()
     from chromadb import HttpClient
+
     physical_name = project_collection_name(
         project.vector_store.collection_name, project.project_id
     )
@@ -55,13 +57,9 @@ async def _chroma() -> None:
         HttpClient(host=settings.chroma_host, port=settings.chroma_port).get_collection,
         physical_name,
     )
-    verify_project_collection(
-        collection, project.vector_store.collection_name, project.project_id
-    )
+    verify_project_collection(collection, project.vector_store.collection_name, project.project_id)
     total = await asyncio.to_thread(collection.count)
-    print(
-        f"chroma=ok collection={physical_name} total_records={total}"
-    )
+    print(f"chroma=ok collection={physical_name} total_records={total}")
 
 
 async def _visual_models() -> None:

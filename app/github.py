@@ -90,9 +90,7 @@ class GitHubAppClient:
             if owns_client:
                 await client.aclose()
 
-    async def repository_files(
-        self, branch: str
-    ) -> tuple[str, tuple[RepositoryFile, ...]]:
+    async def repository_files(self, branch: str) -> tuple[str, tuple[RepositoryFile, ...]]:
         """Return the branch head and blob descriptors without downloading bodies."""
         client = self._http_client or httpx.AsyncClient(timeout=45.0)
         owns_client = self._http_client is None
@@ -104,9 +102,7 @@ class GitHubAppClient:
             installation.raise_for_status()
             installation_payload = installation.json()
             installation_id = (
-                installation_payload.get("id")
-                if isinstance(installation_payload, dict)
-                else None
+                installation_payload.get("id") if isinstance(installation_payload, dict) else None
             )
             if not isinstance(installation_id, int):
                 raise RuntimeError("GitHub returned no App installation ID.")
@@ -208,14 +204,15 @@ class GitHubAppClient:
         if (
             name.startswith(".env")
             or name.endswith((".pem", ".key", ".p12", ".pfx"))
-            or any(part in {"node_modules", "vendor", ".gradle", "build", "dist", "secrets"} for part in normalized.split("/"))
+            or any(
+                part in {"node_modules", "vendor", ".gradle", "build", "dist", "secrets"}
+                for part in normalized.split("/")
+            )
         ):
             return False
         # Same matcher as the exclusions below, so an include and an exclude
         # written in the same syntax behave the same way.
-        if self._repository.include_paths and not matches_any(
-            path, self._repository.include_paths
-        ):
+        if self._repository.include_paths and not matches_any(path, self._repository.include_paths):
             return False
         # fnmatch has no path semantics, so "**/*.docx" missed a .docx at the
         # repository root and "*.kt" matched every .kt in the tree. An exclusion
@@ -238,11 +235,7 @@ class GitHubAppClient:
         self, client: httpx.AsyncClient, installation_id: int
     ) -> str:
         now = datetime.now(UTC)
-        if (
-            self._cached_token
-            and self._cached_token_until
-            and self._cached_token_until > now
-        ):
+        if self._cached_token and self._cached_token_until and self._cached_token_until > now:
             return self._cached_token
         self._cached_token = await self._installation_token(client, installation_id)
         self._cached_token_until = now + timedelta(minutes=50)

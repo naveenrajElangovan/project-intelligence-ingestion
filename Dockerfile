@@ -9,7 +9,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN addgroup --system ingestion && adduser --system --ingroup ingestion ingestion
 
-COPY requirements.txt pyproject.toml README.md ./
+COPY pyproject.toml README.md ./
+COPY --chown=ingestion:ingestion app ./app
+COPY --chown=ingestion:ingestion scripts ./scripts
 # Same CPU-only torch install Dockerfile.worker already uses. On Linux the
 # default PyPI wheel hard-depends on nvidia-cudnn-cu13, nvidia-cusparselt-cu13,
 # nvidia-nccl-cu13, nvidia-nvshmem-cu13 and triton -- about 1.1 GB compressed,
@@ -20,10 +22,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --index-url https://download.pytorch.org/whl/cpu \
     torch==2.11.0
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --disable-pip-version-check -r requirements.txt
-COPY --chown=ingestion:ingestion app ./app
-COPY --chown=ingestion:ingestion scripts ./scripts
-RUN python -m pip install --disable-pip-version-check --no-deps .
+    python -m pip install --disable-pip-version-check .
 RUN python -m scripts.generate_sbom /opt/project-intelligence-ingestion.cdx.json
 
 USER ingestion

@@ -68,8 +68,8 @@ class Settings(BaseSettings):
     # improves nothing already indexed: every unchanged source keeps the chunks
     # its old chunker produced. v5 covers token-accurate sizing, table integrity,
     # boundary-aware prose windows, and content-sniffed format routing.
-    chunker_version: str = "semantic-token-entity-metadata-v9"
-    schema_version: str = "3"
+    chunker_version: str = "semantic-token-entity-metadata-v10"
+    schema_version: Literal["3"] = "3"
     docling_max_pages: int = 500
     docling_timeout_seconds: int = 300
     docling_max_concurrency: int = 2
@@ -123,9 +123,9 @@ class Settings(BaseSettings):
         if not self.github_app_id.isdigit():
             errors.append("PI_INGEST_GITHUB_APP_ID must be configured")
         try:
-            private_key = base64.b64decode(
-                self.github_private_key_base64, validate=True
-            ).decode("utf-8")
+            private_key = base64.b64decode(self.github_private_key_base64, validate=True).decode(
+                "utf-8"
+            )
         except (ValueError, UnicodeDecodeError):
             private_key = ""
         if "BEGIN" not in private_key or "PRIVATE KEY" not in private_key:
@@ -133,14 +133,16 @@ class Settings(BaseSettings):
         if len(self.github_webhook_secret) < 32:
             errors.append("PI_INGEST_GITHUB_WEBHOOK_SECRET must contain at least 32 characters")
         if not self.chroma_host or self.chroma_port < 1 or not self.chroma_collection:
-            errors.append("PI_INGEST_CHROMA_HOST, PI_INGEST_CHROMA_PORT, and PI_INGEST_CHROMA_COLLECTION are required")
+            errors.append(
+                "PI_INGEST_CHROMA_HOST, PI_INGEST_CHROMA_PORT, and PI_INGEST_CHROMA_COLLECTION are required"
+            )
         if not self.control_plane_url.startswith("https://"):
             errors.append("PI_INGEST_CONTROL_PLANE_URL must use HTTPS")
         if len(self.control_plane_api_key) < 32:
             errors.append("PI_INGEST_CONTROL_PLANE_API_KEY must contain at least 32 characters")
-        if not self.state_table_endpoint.startswith("https://") or not self.state_table_endpoint.endswith(
-            ".table.core.windows.net"
-        ):
+        if not self.state_table_endpoint.startswith(
+            "https://"
+        ) or not self.state_table_endpoint.endswith(".table.core.windows.net"):
             errors.append("PI_INGEST_STATE_TABLE_ENDPOINT must be an Azure Table endpoint")
         if len(self.internal_api_key) < 32:
             errors.append("PI_INGEST_INTERNAL_API_KEY must contain at least 32 characters")

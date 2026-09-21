@@ -6,7 +6,18 @@ import pytest
 
 from app.models import SourceChunk, SourceDocument
 from app.projects import VectorStoreRoute
-from app.vector import ChromaVectorStore, _observed_vocabulary, _source_filter
+from app.vector import (
+    ChromaVectorStore,
+    _metadata,
+    _observed_vocabulary,
+    _source_filter,
+    _storage_id,
+)
+
+
+def test_vector_route_rejects_any_schema_other_than_suite_version() -> None:
+    with pytest.raises(ValueError, match="only vector schema version 3"):
+        VectorStoreRoute("project-intelligence", "chunk_text", schema_version="4")
 
 
 class FakeEmbedder:
@@ -108,6 +119,31 @@ def test_interrupted_upsert_never_deletes_existing_generation() -> None:
     assert collection.events == ["read-prior", "upsert"]
 
 
+def test_identical_local_chunk_reuses_vector_without_embedding() -> None:
+    route = VectorStoreRoute("project-intelligence", "chunk_text")
+    document = _document()
+    chunk = _chunk()
+    storage_id = _storage_id(document, chunk.ordinal)
+
+    class IdenticalCollection(FakeCollection):
+        def get(self, *, where=None, ids=None, include=None):
+            if ids is not None:
+                self.events.append("verify")
+                return {"ids": list(ids)}
+            self.events.append("read-prior")
+            return {
+                "ids": [storage_id],
+                "documents": [chunk.content],
+                "metadatas": [_metadata(route, document, chunk)],
+            }
+
+    collection = IdenticalCollection()
+    written = asyncio.run(_store(collection).replace_document(route, document, (chunk,)))
+
+    assert written == 0
+    assert collection.events == ["read-prior", "verify"]
+
+
 def test_unchanged_jira_chunk_updates_metadata_without_reembedding() -> None:
     class DifferentialCollection(FakeCollection):
         def get(self, *, where=None, ids=None, include=None):
@@ -115,22 +151,37 @@ def test_unchanged_jira_chunk_updates_metadata_without_reembedding() -> None:
                 self.events.append("verify")
                 return {"ids": list(ids)}
             self.events.append("read-prior")
+            metadata = _metadata(
+                VectorStoreRoute("project-intelligence", "chunk_text"),
+                document,
+                _chunk(),
+            )
+            metadata["source_version"] = "prior-version"
             return {
                 "ids": ["old-storage-id"],
-                "metadatas": [{"canonical_chunk_id": "chunk-1"}],
+                "documents": ["content"],
+                "metadatas": [metadata],
             }
 
         def update(self, *, ids, metadatas):
             self.events.append("update-metadata")
 
     collection = DifferentialCollection()
-    document = SourceDocument(
-        **{**_document().__dict__, "provider": "JIRA"}
-    ) if hasattr(_document(), "__dict__") else SourceDocument(
-        project_id="DEMO", provider="JIRA", source_id="source-1",
-        source_type="ISSUE", title="Source", reference="DEMO-1",
-        source_url="https://example.atlassian.net/browse/DEMO-1", version="2",
-        content="content", updated_at=datetime.now(UTC),
+    document = (
+        SourceDocument(**{**_document().__dict__, "provider": "JIRA"})
+        if hasattr(_document(), "__dict__")
+        else SourceDocument(
+            project_id="DEMO",
+            provider="JIRA",
+            source_id="source-1",
+            source_type="ISSUE",
+            title="Source",
+            reference="DEMO-1",
+            source_url="https://example.atlassian.net/browse/DEMO-1",
+            version="2",
+            content="content",
+            updated_at=datetime.now(UTC),
+        )
     )
     written = asyncio.run(
         _store(collection).replace_document(
@@ -220,16 +271,15 @@ def test_project_vocabulary_is_rebuilt_from_persisted_chunk_metadata() -> None:
     assert vocabulary["code_extensions"] == [".rs"]
     assert vocabulary["languages"] == ["en", "es"]
     assert collection.written["metadatas"][0]["record_kind"] == "__vocabulary__"
-    assert collection.read_where == {"$and": [{"project_id": "DEMO"}, {"record_kind": "__vocabulary__"}]}
+    assert collection.read_where == {
+        "$and": [{"project_id": "DEMO"}, {"record_kind": "__vocabulary__"}]
+    }
 
 
 def test_vocabulary_requires_five_observations_and_reports_corpus_shape() -> None:
     records = [
-        {"source_id": "long-page", "source_type": "PAGE", "language": "en"}
-        for _ in range(25)
-    ] + [
-        {"source_id": "stray-issue", "source_type": "ISSUE", "language": "en"}
-    ]
+        {"source_id": "long-page", "source_type": "PAGE", "language": "en"} for _ in range(25)
+    ] + [{"source_id": "stray-issue", "source_type": "ISSUE", "language": "en"}]
 
     vocabulary = _observed_vocabulary("DEMO", records)
 

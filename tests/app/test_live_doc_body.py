@@ -29,15 +29,49 @@ def _document(*, as_string: bool) -> dict:
                     {
                         "type": "tableRow",
                         "content": [
-                            {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "id"}]}]},
-                            {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "wire name"}]}]},
+                            {
+                                "type": "tableHeader",
+                                "content": [
+                                    {
+                                        "type": "paragraph",
+                                        "content": [{"type": "text", "text": "id"}],
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "tableHeader",
+                                "content": [
+                                    {
+                                        "type": "paragraph",
+                                        "content": [{"type": "text", "text": "wire name"}],
+                                    }
+                                ],
+                            },
                         ],
                     },
                     {
                         "type": "tableRow",
                         "content": [
-                            {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "116"}]}]},
-                            {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "POS_CLOSE_SHIFT_REQUEST"}]}]},
+                            {
+                                "type": "tableCell",
+                                "content": [
+                                    {
+                                        "type": "paragraph",
+                                        "content": [{"type": "text", "text": "116"}],
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "tableCell",
+                                "content": [
+                                    {
+                                        "type": "paragraph",
+                                        "content": [
+                                            {"type": "text", "text": "POS_CLOSE_SHIFT_REQUEST"}
+                                        ],
+                                    }
+                                ],
+                            },
                         ],
                     },
                 ],

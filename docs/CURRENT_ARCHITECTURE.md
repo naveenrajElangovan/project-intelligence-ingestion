@@ -1,6 +1,12 @@
 # Project Intelligence Ingestion — Current Architecture
 
-Last verified against the repository code and active development topology: 2026-09-12.
+The application suite has one active vector-record schema: version `3`. Ingestion settings and
+project-route construction reject every other version, so ingestion writes only that version;
+introducing another version requires a coordinated replacement across ingestion,
+backend routing, RAG validation, corpus manifests, evaluation, and clients rather than a parallel
+runtime allowlist.
+
+Last verified against the repository code and active development topology: 2026-09-15.
 
 This document presents the production architecture of the Project Intelligence ingestion platform. It explains how approved GitHub, Jira, Confluence, and attachment content moves from source discovery through security inspection, parsing, chunking, embedding, vector persistence, and operational state management.
 
@@ -52,7 +58,7 @@ flowchart TB
         OPS["Operator / scheduler<br/>manual trigger"]
     end
 
-    subgraph API_Image["HTTP image (Dockerfile) — requirements.txt, CPU torch, no Docling/OCR/ClamAV"]
+    subgraph API_Image["HTTP image (Dockerfile) — pyproject runtime, CPU torch, no Docling/OCR/ClamAV"]
         MAIN["app/main.py<br/>FastAPI"]
         R1["GET /health"]
         R2["GET /ready"]

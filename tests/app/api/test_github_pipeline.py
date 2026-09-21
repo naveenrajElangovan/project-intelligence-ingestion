@@ -8,15 +8,15 @@ from fastapi.testclient import TestClient
 from app.api import github as github_api
 from app.config import Settings, get_settings
 from app.dependencies import get_document_workflow, get_project_reader
+from app.main import app
 from app.models import ChangedFile, DocumentIndexResult
 from app.projects import (
     IngestionProject,
-    SourceAccessRule,
-    VectorStoreRoute,
     ProjectIngestionSchedule,
     RepositoryMapping,
+    SourceAccessRule,
+    VectorStoreRoute,
 )
-from app.main import app
 
 
 class FakeProjectReader:

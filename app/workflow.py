@@ -186,9 +186,7 @@ class DocumentIngestionWorkflow:
 
     async def _split(self, state: IngestionState) -> IngestionState:
         began = started()
-        chunks = await asyncio.to_thread(
-            self._chunker.chunk, state["document"], state["artifact"]
-        )
+        chunks = await asyncio.to_thread(self._chunker.chunk, state["document"], state["artifact"])
         await asyncio.to_thread(self._scanner.inspect_generated, state["document"], chunks)
         observe_document_stage(state["document"].provider, "split", began)
         return {"chunks": chunks}

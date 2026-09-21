@@ -1,5 +1,6 @@
-import pytest
 from dataclasses import replace
+
+import pytest
 
 from app.config import Settings
 from app.content_security import ContentSecurityScanner, QuarantinedDocument
@@ -27,7 +28,13 @@ def source(content: str, path: str, mime_type: str = "text/plain") -> SourceDocu
 def test_markdown_preserves_heading_context_without_polluting_evidence() -> None:
     chunks = StructuredDocumentChunker(
         Settings(_env_file=None, chunk_max_tokens=64, chunk_overlap_tokens=8)
-    ).split(source("# Arquitectura\n\n## Seguridad\n\nEl filtro del proyecto siempre se aplica.", "README.md", "text/markdown"))
+    ).split(
+        source(
+            "# Arquitectura\n\n## Seguridad\n\nEl filtro del proyecto siempre se aplica.",
+            "README.md",
+            "text/markdown",
+        )
+    )
 
     assert chunks
     assert chunks[0].structure_path == ("Arquitectura", "Seguridad")
@@ -86,6 +93,80 @@ def test_kotlin_code_chunk_records_modified_class_symbol() -> None:
     assert chunks[0].metadata["symbol"] == "VehicleRepositoryImpl"
 
 
+def test_kotlin_data_class_fields_receive_independent_symbol_metadata() -> None:
+    chunks = StructuredDocumentChunker(Settings(_env_file=None)).split(
+        source(
+            """@Serializable
+@SerialName("PAYMENT_EVENT")
+data class PaymentEvent(
+    @SerialName("event_id") val eventId: Int,
+    @SerialName("amount_cents") val amountCents: Int,
+)""",
+            "PaymentEvent.kt",
+        )
+    )
+
+    fields = {
+        chunk.metadata.get("symbol"): chunk
+        for chunk in chunks
+        if chunk.metadata.get("chunk_profile") == "data-class-field"
+    }
+
+    assert set(fields) == {"eventId", "amountCents"}
+    assert fields["eventId"].metadata["serialized_field"] == "event_id"
+    assert fields["amountCents"].metadata["serialized_field"] == "amount_cents"
+    assert fields["eventId"].metadata["entity_key"] == "PAYMENT_EVENT"
+    assert fields["eventId"].structure_path == (
+        "PaymentEvent.kt",
+        "PaymentEvent",
+        "eventId",
+    )
+
+
+def test_kotlin_annotated_payload_with_many_fields_does_not_backtrack() -> None:
+    declarations = ",\n".join(
+        f'    @SerialName("field_{index}") val field{index}: String' for index in range(18)
+    )
+    chunks = StructuredDocumentChunker(Settings(_env_file=None)).split(
+        source(
+            f"""@Serializable
+data class TicketPayload(
+{declarations}
+)""",
+            "TicketPayload.kt",
+        )
+    )
+
+    fields = [
+        chunk for chunk in chunks if chunk.metadata.get("chunk_profile") == "data-class-field"
+    ]
+
+    assert len(fields) == 18
+    assert fields[0].metadata["serialized_field"] == "field_0"
+    assert fields[-1].metadata["serialized_field"] == "field_17"
+
+
+def test_kotlin_enum_entries_receive_independent_symbol_metadata() -> None:
+    chunks = StructuredDocumentChunker(Settings(_env_file=None)).split(
+        source(
+            """enum class PaymentStatus {
+    APPROVED,
+    DECLINED,
+    ERROR,
+}""",
+            "PaymentStatus.kt",
+        )
+    )
+
+    entries = {
+        chunk.metadata.get("symbol")
+        for chunk in chunks
+        if chunk.metadata.get("chunk_profile") == "enum-entry"
+    }
+
+    assert entries == {"APPROVED", "DECLINED", "ERROR"}
+
+
 def test_kotlin_annotations_are_attached_to_the_declaration() -> None:
     chunks = StructuredDocumentChunker(
         Settings(_env_file=None, code_chunk_max_tokens=20, chunk_overlap_tokens=0)
@@ -102,12 +183,10 @@ def test_kotlin_annotations_are_attached_to_the_declaration() -> None:
 
 
 def test_identifier_dense_kotlin_windows_respect_token_budget() -> None:
-    settings = Settings(
-        _env_file=None, code_chunk_max_tokens=48, chunk_overlap_tokens=8
-    )
+    settings = Settings(_env_file=None, code_chunk_max_tokens=48, chunk_overlap_tokens=8)
     chunker = StructuredDocumentChunker(settings)
     content = "\n".join(
-        f"const val POS_CLOSE_SHIFT_REQUEST_EVENT_{index} = \"pos.close.shift.{index}\""
+        f'const val POS_CLOSE_SHIFT_REQUEST_EVENT_{index} = "pos.close.shift.{index}"'
         for index in range(80)
     )
 
@@ -115,8 +194,7 @@ def test_identifier_dense_kotlin_windows_respect_token_budget() -> None:
 
     assert len(chunks) > 1
     assert all(
-        chunker._count_tokens(chunk.content) <= settings.code_chunk_max_tokens
-        for chunk in chunks
+        chunker._count_tokens(chunk.content) <= settings.code_chunk_max_tokens for chunk in chunks
     )
 
 
@@ -134,20 +212,38 @@ def test_duplicate_bodies_within_one_source_are_committed_once() -> None:
         (source("x", "payload.zip"), "BLOCKED_FILE_TYPE"),
         (
             SourceDocument(
-                project_id="DEMO", provider="GITHUB", source_id="bad", source_type="FILE",
-                title="spoof.pdf", reference="spoof.pdf", source_url="https://example.invalid",
-                version="1", content="", updated_at=None, metadata={"path": "spoof.pdf"},
-                mime_type="application/pdf", content_bytes=b"not-a-pdf",
+                project_id="DEMO",
+                provider="GITHUB",
+                source_id="bad",
+                source_type="FILE",
+                title="spoof.pdf",
+                reference="spoof.pdf",
+                source_url="https://example.invalid",
+                version="1",
+                content="",
+                updated_at=None,
+                metadata={"path": "spoof.pdf"},
+                mime_type="application/pdf",
+                content_bytes=b"not-a-pdf",
             ),
             "MIME_MISMATCH",
         ),
         (source("api_key = 'abcdefghijklmnopqrstuvwxyz123456'", "secrets.txt"), "POTENTIAL_SECRET"),
         (
             SourceDocument(
-                project_id="DEMO", provider="GITHUB", source_id="locked", source_type="FILE",
-                title="locked.pdf", reference="locked.pdf", source_url="https://example.invalid",
-                version="1", content="", updated_at=None, metadata={"path": "locked.pdf"},
-                mime_type="application/pdf", content_bytes=b"%PDF-1.7\n/Encrypt true",
+                project_id="DEMO",
+                provider="GITHUB",
+                source_id="locked",
+                source_type="FILE",
+                title="locked.pdf",
+                reference="locked.pdf",
+                source_url="https://example.invalid",
+                version="1",
+                content="",
+                updated_at=None,
+                metadata={"path": "locked.pdf"},
+                mime_type="application/pdf",
+                content_bytes=b"%PDF-1.7\n/Encrypt true",
             ),
             "PASSWORD_PROTECTED",
         ),

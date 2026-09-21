@@ -1,8 +1,8 @@
 from fastapi import FastAPI, HTTPException, status
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from starlette.responses import Response
 from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import Response
 
 from app.api.github import router as github_router
 from app.api.ingestions import router as ingestions_router

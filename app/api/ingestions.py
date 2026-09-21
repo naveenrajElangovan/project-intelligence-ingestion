@@ -12,9 +12,13 @@ from app.service import IngestionAlreadyRunning, IngestionService
 router = APIRouter(prefix="/v1/projects", tags=["ingestions"])
 
 
+def _default_providers() -> list[Literal["GITHUB", "JIRA", "CONFLUENCE"]]:
+    return ["GITHUB", "JIRA", "CONFLUENCE"]
+
+
 class IngestionRequest(BaseModel):
     providers: list[Literal["GITHUB", "JIRA", "CONFLUENCE"]] = Field(
-        default_factory=lambda: ["GITHUB", "JIRA", "CONFLUENCE"]
+        default_factory=_default_providers
     )
     full: bool = False
 
@@ -25,7 +29,9 @@ class TargetedIngestionRequest(BaseModel):
     cloud_id: str = Field(alias="cloudId", min_length=1, max_length=128)
     resource_type: str = Field(alias="resourceType", min_length=1, max_length=64)
     resource_id: str = Field(alias="resourceId", min_length=1, max_length=128)
-    child_resource_id: str | None = Field(default=None, alias="childResourceId", min_length=1, max_length=128)
+    child_resource_id: str | None = Field(
+        default=None, alias="childResourceId", min_length=1, max_length=128
+    )
     project_or_space_id: str = Field(alias="projectOrSpaceId", min_length=1, max_length=128)
     event_type: str = Field(alias="eventType", min_length=1, max_length=160)
     deleted: bool = False
@@ -66,11 +72,7 @@ async def run_ingestion(
     if not body.providers:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Select a provider.")
     try:
-        return list(
-            await service.ingest_project(
-                project_id, tuple(body.providers), full=body.full
-            )
-        )
+        return list(await service.ingest_project(project_id, tuple(body.providers), full=body.full))
     except LookupError as error:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(error)) from error
     except IngestionAlreadyRunning as error:

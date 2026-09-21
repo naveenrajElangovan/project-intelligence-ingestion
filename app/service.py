@@ -5,6 +5,7 @@ import mimetypes
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal, cast
 from uuid import uuid4
 
 from app.access_rules import resolve_access_policy
@@ -81,7 +82,7 @@ class IngestionService:
                 vector_store=replace(
                     project.vector_store,
                     collection_name=target_collection_name,
-                    schema_version=target_schema_version,
+                    schema_version=cast(Literal["3"], target_schema_version),
                 ),
             )
         requested = {value.upper() for value in providers}
@@ -100,18 +101,18 @@ class IngestionService:
             project.atlassian.resource_url,
         )
         if "JIRA" in requested:
-            for mapping in project.jira_projects:
-                scope = f"{mapping.site_url}|{mapping.project_key}"
+            for jira_mapping in project.jira_projects:
+                scope = f"{jira_mapping.site_url}|{jira_mapping.project_key}"
                 if target_collection_name:
                     scope = f"staging:{target_collection_name}|{scope}"
                 cursor = await self._cursor(project_id, "JIRA", scope, full)
-                documents = client.jira_documents(project_id, mapping, cursor)
+                documents = client.jira_documents(project_id, jira_mapping, cursor)
                 results.append(await self._run_scope(project, "JIRA", scope, documents, full))
         if "CONFLUENCE" in requested:
-            for mapping in project.confluence_spaces:
-                scope = f"{mapping.site_url}|{mapping.space_id}"
+            for confluence_mapping in project.confluence_spaces:
+                scope = f"{confluence_mapping.site_url}|{confluence_mapping.space_id}"
                 cursor = await self._cursor(project_id, "CONFLUENCE", scope, full)
-                documents = client.confluence_documents(project_id, mapping, cursor)
+                documents = client.confluence_documents(project_id, confluence_mapping, cursor)
                 results.append(await self._run_scope(project, "CONFLUENCE", scope, documents, full))
         return tuple(results)
 
@@ -142,31 +143,39 @@ class IngestionService:
         )
         normalized = provider.upper()
         if normalized == "JIRA":
-            mapping = next(
-                (value for value in project.jira_projects if value.project_key == project_or_space_id),
+            jira_mapping = next(
+                (
+                    value
+                    for value in project.jira_projects
+                    if value.project_key == project_or_space_id
+                ),
                 None,
             )
-            if mapping is None:
+            if jira_mapping is None:
                 raise LookupError("The Jira project is not mapped to this application project.")
-            scope = f"{mapping.site_url}|{mapping.project_key}"
+            scope = f"{jira_mapping.site_url}|{jira_mapping.project_key}"
             source_id = f"jira:{cloud_id}:issue:{resource_id}"
-            documents = client.jira_resource_documents(project_id, mapping, resource_id)
+            documents = client.jira_resource_documents(project_id, jira_mapping, resource_id)
         elif normalized == "CONFLUENCE":
-            mapping = next(
-                (value for value in project.confluence_spaces if value.space_id == project_or_space_id),
+            confluence_mapping = next(
+                (
+                    value
+                    for value in project.confluence_spaces
+                    if value.space_id == project_or_space_id
+                ),
                 None,
             )
-            if mapping is None:
+            if confluence_mapping is None:
                 raise LookupError("The Confluence space is not mapped to this application project.")
-            scope = f"{mapping.site_url}|{mapping.space_id}"
+            scope = f"{confluence_mapping.site_url}|{confluence_mapping.space_id}"
             source_id = f"page:{resource_id}"
-            documents = client.confluence_resource_documents(project_id, mapping, resource_id)
+            documents = client.confluence_resource_documents(
+                project_id, confluence_mapping, resource_id
+            )
         else:
             raise ValueError("Targeted ingestion supports Jira and Confluence only.")
         if deleted:
-            manifest = await self._manifests.get_manifest(
-                project_id, normalized, scope, source_id
-            )
+            manifest = await self._manifests.get_manifest(project_id, normalized, scope, source_id)
             if manifest is None:
                 return ProviderIngestionResult(project_id, normalized, 0, 0, 1, 0, 0, 0)
             result = await self._workflow.delete_manifest(
@@ -232,9 +241,7 @@ class IngestionService:
                 await heartbeat
             except asyncio.CancelledError:
                 pass
-            await self._manifests.release_scope_lease(
-                project.project_id, provider, scope, owner
-            )
+            await self._manifests.release_scope_lease(project.project_id, provider, scope, owner)
         return ProviderIngestionResult(
             project.project_id,
             provider,
@@ -424,7 +431,7 @@ class IngestionService:
                         project.project_id, "GITHUB", scope, datetime.now(UTC)
                     )
                     await self._refresh_project_vocabulary(project)
-                result = ProviderIngestionResult(
+                scope_result = ProviderIngestionResult(
                     project_id=project.project_id,
                     provider="GITHUB",
                     discovered=discovered,
@@ -439,7 +446,7 @@ class IngestionService:
                     visual_assets_stored=visual_assets,
                     visual_processing_failures=visual_failures,
                 )
-                results.append(result)
+                results.append(scope_result)
                 logger.info(
                     "ingestion_scope_complete event=ingestion_scope_complete project_id=%s "
                     "provider=GITHUB repository=%s branch=%s commit_sha=%s discovered=%s "

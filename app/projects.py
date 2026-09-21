@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,8 +36,12 @@ class VectorStoreRoute:
     text_field: str
     embedding_field: str = "embedding_text"
     embedding_model: str = "multilingual-e5-large"
-    schema_version: str = "3"
+    schema_version: Literal["3"] = "3"
     indexed_providers: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "3":
+            raise ValueError("VectorStoreRoute supports only vector schema version 3")
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,12 +94,11 @@ class IngestionProject:
             raise ValueError("A repository-specific operation requires one repository mapping.")
         return self.repositories[0]
 
+
 class ProjectReader(Protocol):
     async def get(self, project_id: str) -> IngestionProject | None: ...
 
-    async def find_by_repository(
-        self, owner: str, repository: str
-    ) -> IngestionProject | None: ...
+    async def find_by_repository(self, owner: str, repository: str) -> IngestionProject | None: ...
 
 
 def project_from_payload(payload: dict[str, object]) -> IngestionProject:
@@ -121,21 +124,13 @@ def project_from_payload(payload: dict[str, object]) -> IngestionProject:
     )
     vector_store_value = payload.get("vectorStore")
     vector_store = (
-        cast(dict[str, object], vector_store_value)
-        if isinstance(vector_store_value, dict)
-        else {}
+        cast(dict[str, object], vector_store_value) if isinstance(vector_store_value, dict) else {}
     )
     schedule_value = payload.get("ingestionSchedule")
-    schedule = (
-        cast(dict[str, object], schedule_value)
-        if isinstance(schedule_value, dict)
-        else {}
-    )
+    schedule = cast(dict[str, object], schedule_value) if isinstance(schedule_value, dict) else {}
     atlassian_value = payload.get("atlassian")
     atlassian_payload = (
-        cast(dict[str, object], atlassian_value)
-        if isinstance(atlassian_value, dict)
-        else None
+        cast(dict[str, object], atlassian_value) if isinstance(atlassian_value, dict) else None
     )
     source_access_rules = tuple(
         SourceAccessRule(
@@ -166,7 +161,7 @@ def project_from_payload(payload: dict[str, object]) -> IngestionProject:
             text_field=str(vector_store.get("textField") or "chunk_text"),
             embedding_field=str(vector_store.get("embeddingField") or "embedding_text"),
             embedding_model=str(vector_store.get("embeddingModel") or "multilingual-e5-large"),
-            schema_version=str(vector_store.get("schemaVersion") or "3"),
+            schema_version=cast(Literal["3"], str(vector_store.get("schemaVersion") or "3")),
             indexed_providers=tuple(
                 str(value).upper()
                 for value in _list(vector_store.get("indexedProviders"))
@@ -191,13 +186,9 @@ def project_from_payload(payload: dict[str, object]) -> IngestionProject:
         source_access_rules=source_access_rules,
         retrieval_profile=(
             RetrievalProfile(
-                max_chunks_per_source=int(
-                    cast(str, profile_payload["maxChunksPerSource"])
-                ),
+                max_chunks_per_source=int(cast(str, profile_payload["maxChunksPerSource"])),
                 rerank_top_n=int(cast(str, profile_payload["rerankTopN"])),
-                mixed_source_top_n=int(
-                    cast(str, profile_payload["mixedSourceTopN"])
-                ),
+                mixed_source_top_n=int(cast(str, profile_payload["mixedSourceTopN"])),
                 rerank_score_threshold=float(
                     cast(
                         str,

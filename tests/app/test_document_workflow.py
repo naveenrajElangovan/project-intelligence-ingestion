@@ -1,5 +1,5 @@
-from datetime import UTC, datetime
 import asyncio
+from datetime import UTC, datetime
 
 from app.config import Settings
 from app.models import SourceDocument
@@ -26,7 +26,7 @@ class MemoryManifests:
         parser_version="legacy",
         chunker_version="legacy",
         embedding_profile="legacy",
-        schema_version="1",
+        schema_version="3",
         access_policy_id="",
     ):
         self.value = SourceManifest(
@@ -176,9 +176,7 @@ async def _policy_change_relabels_unchanged_content() -> None:
         vector_store,
         source_access_rules=(matching_rule,),
     )
-    restored_to_shared = await workflow.run(
-        document(), "space:T20", "scan-3", vector_store
-    )
+    restored_to_shared = await workflow.run(document(), "space:T20", "scan-3", vector_store)
 
     assert first.operation == "INDEXED"
     assert relabelled.operation == "INDEXED"
@@ -272,9 +270,7 @@ async def _full_rebuild_forces_unchanged_content_to_be_reembedded() -> None:
     vector_store = VectorStoreRoute("project-intelligence", "chunk_text")
 
     first = await workflow.run(document(), "space:T20", "scan-1", vector_store)
-    rebuilt = await workflow.run(
-        document(), "space:T20", "scan-2", vector_store, force=True
-    )
+    rebuilt = await workflow.run(document(), "space:T20", "scan-2", vector_store, force=True)
 
     assert first.operation == "INDEXED"
     assert rebuilt.operation == "INDEXED"
@@ -310,9 +306,7 @@ def test_deleted_source_is_removed_from_chroma() -> None:
 async def _deleted_source_is_removed_from_chroma() -> None:
     manifests = MemoryManifests()
     vectors = MemoryVectors()
-    workflow = DocumentIngestionWorkflow(
-        Settings(_env_file=None), manifests, vectors
-    )
+    workflow = DocumentIngestionWorkflow(Settings(_env_file=None), manifests, vectors)
     vector_store = VectorStoreRoute("project-intelligence", "chunk_text")
     await workflow.run(document(), "space:T20", "scan-1", vector_store)
 

@@ -16,7 +16,6 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-
 MODEL = "intfloat/multilingual-e5-large"
 
 # The repository ships the same weights four times over: safetensors, a PyTorch

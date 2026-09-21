@@ -22,7 +22,9 @@ import re
 from collections import Counter
 from pathlib import Path
 
-ENTITY_HEADING = re.compile(r"^#{3}\s+`([A-Z][A-Z0-9_]*)`\s+[—-]\s+id\s+\d+,\s+version\s+[\d.]+\s*$")
+ENTITY_HEADING = re.compile(
+    r"^#{3}\s+`([A-Z][A-Z0-9_]*)`\s+[—-]\s+id\s+\d+,\s+version\s+[\d.]+\s*$"
+)
 HEADING = re.compile(r"^(#{2,4})\s+(.+?)\s*$")
 ENTITY_HEADING_B = re.compile(
     r"^#{2,4}\s+[\d.]+\s+`(?P<key>[A-Z][A-Z0-9_]*)`\s+\(id\s+(?P<id>\d+)\)"
@@ -32,22 +34,33 @@ ENTITY_HEADING_B = re.compile(
 def entity_heading(line: str):
     return ENTITY_HEADING.match(line) or ENTITY_HEADING_B.match(line)
 
+
 TABLE_ROW = re.compile(r"^\s*\|")
 STEP_LINE = re.compile(r"^\s*\d+\.\s+\S")
 NAV_TITLE = re.compile(
     r"\b(?:how to use|reading order|volume map|master index|corpus guide|"
-    r"what this volume|document metadata|scope and audience|index)\b", re.IGNORECASE)
-GLOSSARY_TITLE = re.compile(r"\b(?:glossar\w*|vocabular\w*|terminolog\w*|definitions?)\b", re.IGNORECASE)
-REGISTRY_TITLE = re.compile(r"\b(?:registry|matrix|inventory|catalog\w*|map|ownership|reference table)\b", re.IGNORECASE)
-WORKFLOW_TITLE = re.compile(r"\b(?:flow|lifecycle|workflow|process|walkthrough|end.to.end)\b", re.IGNORECASE)
+    r"what this volume|document metadata|scope and audience|index)\b",
+    re.IGNORECASE,
+)
+GLOSSARY_TITLE = re.compile(
+    r"\b(?:glossar\w*|vocabular\w*|terminolog\w*|definitions?)\b", re.IGNORECASE
+)
+REGISTRY_TITLE = re.compile(
+    r"\b(?:registry|matrix|inventory|catalog\w*|map|ownership|reference table)\b", re.IGNORECASE
+)
+WORKFLOW_TITLE = re.compile(
+    r"\b(?:flow|lifecycle|workflow|process|walkthrough|end.to.end)\b", re.IGNORECASE
+)
 
-TABLE_DOMINANT = 0.28   # lowered from 0.35: PLAT-RAG-00 sits at 0.318 and is
-                        # unmistakably a registry document. BOT-RAG-03, the
-                        # nearest narrative, is 0.216 -- a comfortable gap.
+TABLE_DOMINANT = 0.28  # lowered from 0.35: PLAT-RAG-00 sits at 0.318 and is
+# unmistakably a registry document. BOT-RAG-03, the
+# nearest narrative, is 0.216 -- a comfortable gap.
 STEP_DOMINANT = 0.08
 
 
-def classify_section(title: str, body: list[str], doc_default: str, *, raw_heading: str = "") -> tuple[str, str]:
+def classify_section(
+    title: str, body: list[str], doc_default: str, *, raw_heading: str = ""
+) -> tuple[str, str]:
     live = [line for line in body if line.strip()]
     total = max(len(live), 1)
     tables = sum(bool(TABLE_ROW.match(line)) for line in body)
@@ -103,8 +116,10 @@ def main() -> None:
         summary = " ".join(f"{k}:{v}" for k, v in local.most_common())
         print(f"{path.name[:43]:44} {sum(local.values()):>8}  {summary}")
 
-    print(f"\n{'CORPUS TOTAL':44} {sum(totals.values()):>8}  " +
-          " ".join(f"{k}:{v}" for k, v in totals.most_common()))
+    print(
+        f"\n{'CORPUS TOTAL':44} {sum(totals.values()):>8}  "
+        + " ".join(f"{k}:{v}" for k, v in totals.most_common())
+    )
 
     for needle in arguments.show:
         print(f"\n--- sections matching {needle!r} ---")

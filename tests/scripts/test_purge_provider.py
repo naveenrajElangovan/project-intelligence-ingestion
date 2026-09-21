@@ -6,8 +6,8 @@ import asyncio
 from app.projects import (
     ConfluenceMapping,
     IngestionProject,
-    VectorStoreRoute,
     RepositoryMapping,
+    VectorStoreRoute,
 )
 from app.state import AzureTableManifestStore
 from scripts.purge_provider import _scopes
@@ -53,14 +53,16 @@ def _project():
     return IngestionProject(
         project_id="DEMO",
         display_name="DEMO",
-        repositories=(
-            RepositoryMapping("acme", "repo", ("main", "release"), (), ()),
-        ),
+        repositories=(RepositoryMapping("acme", "repo", ("main", "release"), (), ()),),
         jira_projects=(),
         confluence_spaces=(
-            ConfluenceMapping(site_url="https://s.atlassian.net", space_key="Example", space_id="99"),
+            ConfluenceMapping(
+                site_url="https://s.atlassian.net", space_key="Example", space_id="99"
+            ),
         ),
-        vector_store=VectorStoreRoute(collection_name="project-intelligence", text_field="chunk_text"),
+        vector_store=VectorStoreRoute(
+            collection_name="project-intelligence", text_field="chunk_text"
+        ),
     )
 
 

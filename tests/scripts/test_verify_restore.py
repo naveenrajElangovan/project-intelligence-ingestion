@@ -6,8 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 
-
-SCRIPT = Path(__file__).parents[1] / ".baselines" / "verify_restore.py"
+SCRIPT = Path(__file__).parents[2] / ".baselines" / "verify_restore.py"
 
 
 def _load_verifier():

@@ -15,19 +15,37 @@ from app.models import SourceChunk, SourceDocument
 from app.source_references import ReferenceValidationError, RepositoryReferences
 
 _BLOCKED_EXTENSIONS = {
-    ".7z", ".bat", ".cmd", ".com", ".dll", ".dmg", ".docm", ".exe",
-    ".gz", ".iso", ".jar", ".jsm", ".msi", ".pptm", ".rar", ".scr",
-    ".tar", ".vbs", ".xlsm", ".zip",
+    ".7z",
+    ".bat",
+    ".cmd",
+    ".com",
+    ".dll",
+    ".dmg",
+    ".docm",
+    ".exe",
+    ".gz",
+    ".iso",
+    ".jar",
+    ".jsm",
+    ".msi",
+    ".pptm",
+    ".rar",
+    ".scr",
+    ".tar",
+    ".vbs",
+    ".xlsm",
+    ".zip",
 }
 _SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-    re.compile(r"(?i)(?:api[_-]?key|client[_-]?secret|password)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{16,}"),
+    re.compile(
+        r"(?i)(?:api[_-]?key|client[_-]?secret|password)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{16,}"
+    ),
     re.compile(r"\bgh[opsu]_[A-Za-z0-9]{30,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
 _CROSS_FIELD_SECRET_PATTERNS = tuple(
-    re.compile(pattern.pattern.replace(r"\b", ""), pattern.flags)
-    for pattern in _SECRET_PATTERNS
+    re.compile(pattern.pattern.replace(r"\b", ""), pattern.flags) for pattern in _SECRET_PATTERNS
 )
 
 
@@ -56,11 +74,18 @@ class ContentSecurityScanner:
         if any(pattern.search(value) for pattern in _SECRET_PATTERNS):
             return True
         try:
-            normalized = self._references.normalize(value, document.project_id) if document.provider.upper() == "JIRA" else value
+            normalized = (
+                self._references.normalize(value, document.project_id)
+                if document.provider.upper() == "JIRA"
+                else value
+            )
         except ReferenceValidationError as error:
-            raise QuarantinedDocument(QuarantineReason(
-                "UNVERIFIED_SOURCE_REFERENCE", "A repository reference failed pinned provenance validation."
-            )) from error
+            raise QuarantinedDocument(
+                QuarantineReason(
+                    "UNVERIFIED_SOURCE_REFERENCE",
+                    "A repository reference failed pinned provenance validation.",
+                )
+            ) from error
         return _has_high_entropy_secret(normalized)
 
     def inspect_generated(self, document: SourceDocument, chunks: tuple[SourceChunk, ...]) -> None:
@@ -75,8 +100,15 @@ class ContentSecurityScanner:
                     self._reject_generated()
         for metadata in groups:
             values = list(metadata_text_values(metadata))
-            if len(values) > 8192 or sum(len(value.encode("utf-8")) for value in values) > 4_000_000:
-                raise QuarantinedDocument(QuarantineReason("METADATA_LIMIT", "Generated metadata exceeds its bounded scan limits."))
+            if (
+                len(values) > 8192
+                or sum(len(value.encode("utf-8")) for value in values) > 4_000_000
+            ):
+                raise QuarantinedDocument(
+                    QuarantineReason(
+                        "METADATA_LIMIT", "Generated metadata exceeds its bounded scan limits."
+                    )
+                )
             if any(self._sensitive(value, document) for value in values):
                 self._reject_generated()
             canonical = json.dumps(metadata, sort_keys=True, ensure_ascii=False)
@@ -88,9 +120,14 @@ class ContentSecurityScanner:
             # define adjacency. Unordered sibling fields are never concatenated.
             ordered_groups = [enrichment_values(metadata), *ordered_metadata_values(metadata)]
             for ordered in ordered_groups:
-                if any(pattern.search("".join(ordered)) for pattern in _CROSS_FIELD_SECRET_PATTERNS):
+                if any(
+                    pattern.search("".join(ordered)) for pattern in _CROSS_FIELD_SECRET_PATTERNS
+                ):
                     self._reject_generated()
-                normalized = [_entropy_scan_text(self._references.normalize(value, document.project_id)) for value in ordered]
+                normalized = [
+                    _entropy_scan_text(self._references.normalize(value, document.project_id))
+                    for value in ordered
+                ]
                 if _has_high_entropy_secret("".join(normalized)):
                     self._reject_generated()
                 for start in range(len(normalized)):
@@ -104,9 +141,12 @@ class ContentSecurityScanner:
 
     @staticmethod
     def _reject_generated() -> None:
-        raise QuarantinedDocument(QuarantineReason(
-            "POTENTIAL_SECRET", "Potential credential material was detected in generated content."
-        ))
+        raise QuarantinedDocument(
+            QuarantineReason(
+                "POTENTIAL_SECRET",
+                "Potential credential material was detected in generated content.",
+            )
+        )
 
     def inspect(self, document: SourceDocument) -> bool:
         path = str(document.metadata.get("path") or document.title)
@@ -119,7 +159,9 @@ class ContentSecurityScanner:
         if payload is not None:
             if len(payload) > self._settings.max_attachment_bytes:
                 raise QuarantinedDocument(
-                    QuarantineReason("FILE_TOO_LARGE", "The source exceeds the configured size limit.")
+                    QuarantineReason(
+                        "FILE_TOO_LARGE", "The source exceeds the configured size limit."
+                    )
                 )
             self._validate_signature(suffix, payload)
             if self._settings.enable_malware_scan:
@@ -143,16 +185,21 @@ class ContentSecurityScanner:
         for visual in document.local_visuals:
             if len(visual.content) > self._settings.max_attachment_bytes:
                 raise QuarantinedDocument(
-                    QuarantineReason("FILE_TOO_LARGE", "A linked visual exceeds the configured size limit.")
+                    QuarantineReason(
+                        "FILE_TOO_LARGE", "A linked visual exceeds the configured size limit."
+                    )
                 )
             valid = (
                 visual.content.startswith(b"\x89PNG\r\n\x1a\n")
                 or visual.content.startswith(b"\xff\xd8\xff")
-                or visual.content.startswith((b"RIFF",)) and visual.content[8:12] == b"WEBP"
+                or visual.content.startswith((b"RIFF",))
+                and visual.content[8:12] == b"WEBP"
             )
             if not valid:
                 raise QuarantinedDocument(
-                    QuarantineReason("MIME_MISMATCH", "A linked visual has an invalid raster signature.")
+                    QuarantineReason(
+                        "MIME_MISMATCH", "A linked visual has an invalid raster signature."
+                    )
                 )
             if self._settings.enable_malware_scan:
                 self._clamav_scan(visual.content)
@@ -168,7 +215,9 @@ class ContentSecurityScanner:
         }
         if suffix in signatures and not signatures[suffix]:
             raise QuarantinedDocument(
-                QuarantineReason("MIME_MISMATCH", "The file signature does not match its extension.")
+                QuarantineReason(
+                    "MIME_MISMATCH", "The file signature does not match its extension."
+                )
             )
         if suffix in {".docx", ".pptx", ".xlsx"}:
             try:
@@ -181,11 +230,15 @@ class ContentSecurityScanner:
             required_prefix = {".docx": "word/", ".pptx": "ppt/", ".xlsx": "xl/"}[suffix]
             if not any(name.startswith(required_prefix) for name in names):
                 raise QuarantinedDocument(
-                    QuarantineReason("MIME_MISMATCH", "The Office document type does not match its extension.")
+                    QuarantineReason(
+                        "MIME_MISMATCH", "The Office document type does not match its extension."
+                    )
                 )
             if any(name.lower().endswith("vbaproject.bin") for name in names):
                 raise QuarantinedDocument(
-                    QuarantineReason("MACRO_CONTENT", "Macro-enabled Office content is not allowed.")
+                    QuarantineReason(
+                        "MACRO_CONTENT", "Macro-enabled Office content is not allowed."
+                    )
                 )
         if payload.startswith((b"MZ", b"\x7fELF")):
             raise QuarantinedDocument(
@@ -228,8 +281,10 @@ def metadata_text_values(value, depth=0, *, include_keys=True):
         for key, item in value.items():
             if include_keys:
                 yield str(key)
-            if include_keys and isinstance(item, (str, int, float)) and re.search(
-                r"(?i)(?:api[_-]?key|client[_-]?secret|password)$", str(key)
+            if (
+                include_keys
+                and isinstance(item, (str, int, float))
+                and re.search(r"(?i)(?:api[_-]?key|client[_-]?secret|password)$", str(key))
             ):
                 yield f"{key}={item}"
             yield from metadata_text_values(item, depth + 1, include_keys=include_keys)
@@ -249,7 +304,9 @@ def metadata_text_values(value, depth=0, *, include_keys=True):
 
 def ordered_metadata_values(value, depth=0):
     if depth > 32:
-        raise QuarantinedDocument(QuarantineReason("METADATA_TOO_DEEP", "Source metadata exceeds the nesting limit."))
+        raise QuarantinedDocument(
+            QuarantineReason("METADATA_TOO_DEEP", "Source metadata exceeds the nesting limit.")
+        )
     if isinstance(value, dict):
         for item in value.values():
             yield from ordered_metadata_values(item, depth + 1)
@@ -257,7 +314,11 @@ def ordered_metadata_values(value, depth=0):
         adjacent = []
         for item in value:
             try:
-                decoded = json.loads(item) if isinstance(item, str) and item.lstrip().startswith(("[", "{")) else None
+                decoded = (
+                    json.loads(item)
+                    if isinstance(item, str) and item.lstrip().startswith(("[", "{"))
+                    else None
+                )
             except ValueError:
                 decoded = None
             if isinstance(item, str) and not isinstance(decoded, (dict, list)):

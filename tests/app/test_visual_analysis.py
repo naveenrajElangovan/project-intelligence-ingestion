@@ -1,5 +1,5 @@
-from datetime import UTC, datetime
 from dataclasses import replace
+from datetime import UTC, datetime
 from io import BytesIO
 
 from PIL import Image
@@ -73,9 +73,7 @@ def test_remote_and_active_markdown_images_are_not_resolved() -> None:
 def test_visual_metadata_is_added_before_chroma_indexing() -> None:
     chunks = StructuredDocumentChunker(
         Settings(_env_file=None, visual_analysis_enabled=True)
-    ).split(
-        _document("# Architecture\n\n```mermaid\nflowchart LR\nA --> B\n```")
-    )
+    ).split(_document("# Architecture\n\n```mermaid\nflowchart LR\nA --> B\n```"))
     assert chunks
     assert chunks[0].visual_eligible is True
     assert chunks[0].visual_asset_ids
@@ -101,7 +99,9 @@ def test_only_safe_repository_local_images_are_resolved_and_extracted() -> None:
 
 def test_binary_document_is_converted_once_before_chunking(monkeypatch) -> None:
     chunker = StructuredDocumentChunker(Settings(_env_file=None))
-    binary = replace(_document(""), title="design.pdf", mime_type="application/pdf", content_bytes=b"pdf")
+    binary = replace(
+        _document(""), title="design.pdf", mime_type="application/pdf", content_bytes=b"pdf"
+    )
     calls = 0
 
     def artifact(_document):
@@ -130,7 +130,9 @@ def test_binary_document_is_converted_once_before_chunking(monkeypatch) -> None:
 
 def test_confluence_html_table_is_analyzed_before_chunking() -> None:
     document = replace(
-        _document("<table><tr><th>Service</th><th>Store</th></tr><tr><td>RAG</td><td>Chroma</td></tr></table>"),
+        _document(
+            "<table><tr><th>Service</th><th>Store</th></tr><tr><td>RAG</td><td>Chroma</td></tr></table>"
+        ),
         title="Architecture",
         mime_type="text/html",
         metadata={"page_id": "44"},

@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Any, Literal, Protocol, cast
 
 from azure.core import MatchConditions
 from azure.core.credentials import TokenCredential
@@ -13,6 +13,12 @@ from pymongo.errors import DuplicateKeyError
 
 from app.config import Settings
 from app.models import SourceDocument
+
+
+def _require_schema_version(value: str) -> Literal["3"]:
+    if value != "3":
+        raise ValueError("schema_version must be '3'")
+    return "3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,8 +38,11 @@ class SourceManifest:
     parser_version: str = "legacy"
     chunker_version: str = "legacy"
     embedding_profile: str = "legacy"
-    schema_version: str = "1"
+    schema_version: Literal["3"] = "3"
     access_policy_id: str = ""
+
+    def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version)
 
 
 class ManifestStore(Protocol):
@@ -63,7 +72,7 @@ class ManifestStore(Protocol):
         parser_version: str = "legacy",
         chunker_version: str = "legacy",
         embedding_profile: str = "legacy",
-        schema_version: str = "1",
+        schema_version: Literal["3"] = "3",
         access_policy_id: str = "",
     ) -> None: ...
 
@@ -138,7 +147,7 @@ class AzureTableManifestStore:
     ) -> bool:
         partition = _partition(project_id, provider, scope)
         now = datetime.now(UTC)
-        entity = {
+        entity: dict[str, object] = {
             "PartitionKey": partition,
             "RowKey": "__lease__",
             "owner": owner,
@@ -205,9 +214,7 @@ class AzureTableManifestStore:
             raise
         if str(current.get("owner") or "") != owner:
             return False
-        current["expires_at"] = (
-            datetime.now(UTC) + timedelta(seconds=ttl_seconds)
-        ).isoformat()
+        current["expires_at"] = (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat()
         try:
             await asyncio.to_thread(
                 self._table.update_entity,
@@ -232,9 +239,10 @@ class AzureTableManifestStore:
         parser_version: str = "legacy",
         chunker_version: str = "legacy",
         embedding_profile: str = "legacy",
-        schema_version: str = "1",
+        schema_version: Literal["3"] = "3",
         access_policy_id: str = "",
     ) -> None:
+        schema_version = _require_schema_version(schema_version)
         entity = {
             "PartitionKey": _partition(document.project_id, document.provider, scope),
             "RowKey": _row(document.source_id),
@@ -287,9 +295,7 @@ class AzureTableManifestStore:
 
     async def touch_manifest(self, manifest: SourceManifest, scan_id: str) -> None:
         entity = {
-            "PartitionKey": _partition(
-                manifest.project_id, manifest.provider, manifest.scope
-            ),
+            "PartitionKey": _partition(manifest.project_id, manifest.provider, manifest.scope),
             "RowKey": _row(manifest.source_id),
             "project_id": manifest.project_id,
             "provider": manifest.provider,
@@ -386,11 +392,9 @@ class AzureTableManifestStore:
             manifest
             for entity in entities
             if not str(entity.get("RowKey") or "").startswith("__")
-            if (manifest := _manifest(entity)).last_seen_run != scan_id
-            and not manifest.deleted
+            if (manifest := _manifest(entity)).last_seen_run != scan_id and not manifest.deleted
         )
         return manifests, token
-
 
     async def purge_scope(self, project_id: str, provider: str, scope: str) -> int:
         """Delete every row for one provider scope, cursor and quarantine included.
@@ -416,7 +420,6 @@ class AzureTableManifestStore:
             await asyncio.to_thread(self._table.delete_entity, partition, row_key)
         return len(keys)
 
-
     async def scan_scopes(self, project_id: str) -> dict[str, set[str]]:
         """Return the provider scopes this project has written manifests under.
 
@@ -428,9 +431,7 @@ class AzureTableManifestStore:
 
         def scan() -> dict[str, set[str]]:
             found: dict[str, set[str]] = {}
-            for entity in self._table.list_entities(
-                select=["project_id", "provider", "scope"]
-            ):
+            for entity in self._table.list_entities(select=["project_id", "provider", "scope"]):
                 if str(entity.get("project_id") or "") != project_id:
                     continue
                 provider = str(entity.get("provider") or "").upper()
@@ -448,7 +449,9 @@ class MongoManifestStore:
     def __init__(self, url: str, database: str, collection: str) -> None:
         if not url:
             raise RuntimeError("PI_INGEST_STATE_MONGODB_URL is required.")
-        self._client = MongoClient(url, serverSelectionTimeoutMS=5000)
+        self._client: MongoClient[dict[str, object]] = MongoClient(
+            url, serverSelectionTimeoutMS=5000
+        )
         self._collection = self._client[database][collection]
 
     @classmethod
@@ -513,9 +516,7 @@ class MongoManifestStore:
             },
             {
                 "$set": {
-                    "expires_at": (
-                        datetime.now(UTC) + timedelta(seconds=ttl_seconds)
-                    ).isoformat()
+                    "expires_at": (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat()
                 }
             },
         )
@@ -531,9 +532,10 @@ class MongoManifestStore:
         parser_version="legacy",
         chunker_version="legacy",
         embedding_profile="legacy",
-        schema_version="1",
+        schema_version="3",
         access_policy_id="",
     ):
+        schema_version = _require_schema_version(schema_version)
         partition = _partition(document.project_id, document.provider, scope)
         row = _row(document.source_id)
         entity = {
@@ -592,7 +594,11 @@ class MongoManifestStore:
     async def touch_manifest(self, manifest, scan_id):
         await asyncio.to_thread(
             self._collection.update_one,
-            {"_id": self._id(manifest.project_id, manifest.provider, manifest.scope, _row(manifest.source_id))},
+            {
+                "_id": self._id(
+                    manifest.project_id, manifest.provider, manifest.scope, _row(manifest.source_id)
+                )
+            },
             {"$set": {"last_seen_run": scan_id}},
         )
 
@@ -650,9 +656,7 @@ class MongoManifestStore:
             query = {"partition": partition}
             if continuation_token:
                 query["_id"] = {"$gt": continuation_token}
-            return list(
-                self._collection.find(query).sort("_id", ASCENDING).limit(page_size + 1)
-            )
+            return list(self._collection.find(query).sort("_id", ASCENDING).limit(page_size + 1))
 
         values = await asyncio.to_thread(read_page)
         more = len(values) > page_size
@@ -662,8 +666,7 @@ class MongoManifestStore:
             manifest
             for entity in values
             if not str(entity.get("row") or "").startswith("__")
-            if (manifest := _manifest(entity)).last_seen_run != scan_id
-            and not manifest.deleted
+            if (manifest := _manifest(entity)).last_seen_run != scan_id and not manifest.deleted
         )
         return manifests, token
 
@@ -677,9 +680,7 @@ class MongoManifestStore:
     async def scan_scopes(self, project_id):
         values = await asyncio.to_thread(
             lambda: list(
-                self._collection.find(
-                    {"project_id": project_id}, {"provider": 1, "scope": 1}
-                )
+                self._collection.find({"project_id": project_id}, {"provider": 1, "scope": 1})
             )
         )
         found: dict[str, set[str]] = {}
@@ -705,6 +706,7 @@ def _row(source_id: str) -> str:
 
 
 def _manifest(entity: dict[str, object]) -> SourceManifest:
+    schema_version = _require_schema_version(str(entity.get("schema_version") or "3"))
     return SourceManifest(
         project_id=str(entity.get("project_id") or ""),
         provider=str(entity.get("provider") or ""),
@@ -715,13 +717,13 @@ def _manifest(entity: dict[str, object]) -> SourceManifest:
         source_url=str(entity.get("source_url") or ""),
         version=str(entity.get("version") or ""),
         content_hash=str(entity.get("content_hash") or ""),
-        chunk_count=int(entity.get("chunk_count") or 0),
+        chunk_count=int(cast(Any, entity.get("chunk_count") or 0)),
         last_seen_run=str(entity.get("last_seen_run") or ""),
         deleted=bool(entity.get("deleted", False)),
         parser_version=str(entity.get("parser_version") or "legacy"),
         chunker_version=str(entity.get("chunker_version") or "legacy"),
         embedding_profile=str(entity.get("embedding_profile") or "legacy"),
-        schema_version=str(entity.get("schema_version") or "1"),
+        schema_version=schema_version,
         access_policy_id=str(entity.get("access_policy_id") or ""),
     )
 

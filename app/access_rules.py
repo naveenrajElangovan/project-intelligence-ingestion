@@ -8,15 +8,12 @@ from collections.abc import Sequence
 from app.models import SourceDocument
 from app.projects import SourceAccessRule
 
-
 _PROVIDERS = {"CONFLUENCE", "JIRA", "GITHUB"}
 _MATCH_FIELDS = {"TITLE", "SPACE_KEY", "LABEL", "PATH"}
 _DEPARTMENT = re.compile(r"[A-Z0-9_]{2,64}")
 
 
-def validate_source_access_rules(
-    project_id: str, rules: Sequence[SourceAccessRule]
-) -> None:
+def validate_source_access_rules(project_id: str, rules: Sequence[SourceAccessRule]) -> None:
     shared = f"project:{project_id}"
     department_prefix = f"department:{project_id}:"
     for index, rule in enumerate(rules):

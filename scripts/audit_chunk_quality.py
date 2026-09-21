@@ -28,14 +28,13 @@ tells you there is a problem and an example tells you what it is.
 from __future__ import annotations
 
 import argparse
-import re
-from collections import Counter, defaultdict
 import hashlib
+import re
 import statistics
+from collections import Counter, defaultdict
 
-from app.config import get_settings
 from app.chroma_collections import project_collection_name, verify_project_collection
-
+from app.config import get_settings
 
 EMBEDDER_POSITION_LIMIT = 512
 PASSAGE_PREFIX = "passage: "
@@ -68,9 +67,12 @@ def main(
     settings = get_settings()
     tokenizer = _tokenizer(settings.embedding_tokenizer)
     from chromadb import HttpClient
+
     logical_collection_name = collection_name
     collection_name = project_collection_name(logical_collection_name, project_id)
-    collection = HttpClient(host=settings.chroma_host, port=settings.chroma_port).get_collection(collection_name)
+    collection = HttpClient(host=settings.chroma_host, port=settings.chroma_port).get_collection(
+        collection_name
+    )
     verify_project_collection(collection, logical_collection_name, project_id)
 
     offset = 0
@@ -148,14 +150,15 @@ def main(
             + (f" for provider {provider}." if provider else ".")
         )
 
-    duplicates = {
-        digest: ids for digest, ids in body_hashes.items() if len(ids) > 1
-    }
+    duplicates = {digest: ids for digest, ids in body_hashes.items() if len(ids) > 1}
     duplicate_records = sum(len(ids) - 1 for ids in duplicates.values())
 
     print(f"records={total} sources={len(sources)} collection={collection_name}")
     print("providers=" + ", ".join(f"{key}:{providers[key]}" for key in sorted(providers)))
-    print("schema_version=" + ", ".join(f"{key}:{schema_versions[key]}" for key in sorted(schema_versions)))
+    print(
+        "schema_version="
+        + ", ".join(f"{key}:{schema_versions[key]}" for key in sorted(schema_versions))
+    )
     if len(schema_versions) > 1:
         print(
             "  MIXED SCHEMA VERSIONS -- records not matching the project record are "
@@ -175,8 +178,7 @@ def main(
     for name in sorted(per_provider_lengths):
         values = per_provider_lengths[name]
         print(
-            f"  {name}: median={int(statistics.median(values))} max={max(values)} "
-            f"n={len(values)}"
+            f"  {name}: median={int(statistics.median(values))} max={max(values)} n={len(values)}"
         )
 
     findings = (

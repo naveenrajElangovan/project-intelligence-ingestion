@@ -6,7 +6,7 @@ import pytest
 from app.config import Settings
 from app.content_security import ContentSecurityScanner, QuarantinedDocument
 from app.jira_relationships import relationship_sections
-from tests.test_jira_current_state import document
+from tests.app.test_jira_current_state import document
 
 
 def test_relationship_keeps_identity_and_meaning_together_and_original_intact():

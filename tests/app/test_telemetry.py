@@ -35,15 +35,21 @@ def test_scope_and_document_metrics_are_recorded() -> None:
         record_document_result("github", "indexed", 3)
         observe_document_stage("github", "write", began)
 
-    assert _sample_value(
-        "pi_ingestion_scopes_total",
-        {"provider": "GITHUB", "mode": "incremental", "outcome": "succeeded"},
-    ) == before + 1
+    assert (
+        _sample_value(
+            "pi_ingestion_scopes_total",
+            {"provider": "GITHUB", "mode": "incremental", "outcome": "succeeded"},
+        )
+        == before + 1
+    )
     assert _sample_value("pi_ingestion_active_scopes", {"provider": "GITHUB"}) == 0
-    assert _sample_value(
-        "pi_ingestion_documents_total",
-        {"provider": "GITHUB", "operation": "INDEXED"},
-    ) >= 1
+    assert (
+        _sample_value(
+            "pi_ingestion_documents_total",
+            {"provider": "GITHUB", "operation": "INDEXED"},
+        )
+        >= 1
+    )
     assert _sample_value("pi_ingestion_chunks_written_total", {"provider": "GITHUB"}) >= 3
 
 
