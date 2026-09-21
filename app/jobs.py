@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-import asyncio
 import json
+from dataclasses import asdict, dataclass
+from typing import Any, cast
 from uuid import uuid4
 
 from azure.identity import DefaultAzureCredential
@@ -69,7 +69,9 @@ async def enqueue_job(settings: Settings, job: IngestionJob) -> None:
     )
     client = ServiceBusClient(
         fully_qualified_namespace=settings.service_bus_namespace,
-        credential=credential,
+        # azure-servicebus 7.14's aio typing excludes the synchronous credential
+        # accepted by this established runtime path under Python 3.12/mypy 1.18+.
+        credential=cast(Any, credential),
     )
     async with client:
         sender = client.get_queue_sender(settings.service_bus_queue_name)

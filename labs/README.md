@@ -19,7 +19,7 @@ Exercises: change the token cap; add a third heading; compare the stable IDs bef
 Install the worker dependencies, then provide a PDF, DOCX, PPTX, or XLSX smaller than the configured limits:
 
 ```bash
-.venv/bin/pip install -r requirements-worker.txt
+.venv/bin/pip install -e '.[dev,worker]'
 .venv/bin/python labs/lab02_docling.py ./sample.pdf
 ```
 
@@ -27,4 +27,5 @@ Expected: local-only chunks with hierarchy and page locators when Docling expose
 
 Exercises: compare a native and scanned PDF; inspect table header preservation; try a spoofed extension and observe quarantine.
 
-Automated coverage: `tests/test_learning_labs.py` and `tests/test_structured_chunking_security.py`.
+Automated coverage: `tests/labs/test_learning_labs.py` and
+`tests/app/test_structured_chunking_security.py`.

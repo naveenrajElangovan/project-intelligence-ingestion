@@ -5,7 +5,7 @@ import json
 import re
 from io import BytesIO
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable, Protocol
 
 from bs4 import BeautifulSoup
 from langchain_text_splitters import (
@@ -49,10 +49,17 @@ _CODE_LANGUAGES = {
 }
 
 
+class _EmbeddingModel(Protocol):
+    tokenizer: Any
+    model_card_data: object
+
+
 class _SharedSentenceTransformerSplitter(SentenceTransformersTokenTextSplitter):
     """Use LangChain's splitter with the process-cached embedding model."""
 
-    def __init__(self, model: object, *, tokens_per_chunk: int, chunk_overlap: int) -> None:
+    def __init__(
+        self, model: _EmbeddingModel, *, tokens_per_chunk: int, chunk_overlap: int
+    ) -> None:
         TextSplitter.__init__(
             self,
             chunk_size=tokens_per_chunk,
@@ -97,11 +104,11 @@ class StructuredDocumentChunker:
         self,
         settings: Settings,
         *,
-        embedding_model_loader: Callable[[], object] | None = None,
+        embedding_model_loader: Callable[[], _EmbeddingModel] | None = None,
     ) -> None:
         self._settings = settings
         self._embedding_model_loader = embedding_model_loader
-        self._embedding_model = None
+        self._embedding_model: _EmbeddingModel | None = None
         self._sentence_splitter: SentenceTransformersTokenTextSplitter | None = None
         self._token_counts: dict[str, int] = {}
 
@@ -113,9 +120,13 @@ class StructuredDocumentChunker:
     ) -> tuple[SourceChunk, ...]:
         parsed = artifact.parsing
         labels_value = document.metadata.get("labels") or ()
-        labels = tuple(str(value) for value in labels_value) if isinstance(
-            labels_value, (list, tuple, set)
-        ) else (str(labels_value),) if labels_value else ()
+        labels = (
+            tuple(str(value) for value in labels_value)
+            if isinstance(labels_value, (list, tuple, set))
+            else (str(labels_value),)
+            if labels_value
+            else ()
+        )
         category = detect_category(document.title, document.content, labels=labels)
         chunks: list[SourceChunk] = []
         if not document.content.strip() and document.content_bytes is None:
@@ -131,8 +142,7 @@ class StructuredDocumentChunker:
             # converted by the parser, so an empty `content` is normal there and
             # must not be treated as a missing body.
             raise ValueError(
-                f"{document.provider} {document.source_id} has an empty body; "
-                "nothing to chunk"
+                f"{document.provider} {document.source_id} has an empty body; nothing to chunk"
             )
         entity_decisions = tuple(
             EntityDecision("", "CODE chunks do not infer entities from identifiers")
@@ -146,19 +156,23 @@ class StructuredDocumentChunker:
             for element in parsed.elements
         )
         document_entities = {
-            decision.entity.casefold()
-            for decision in entity_decisions
-            if decision.entity.strip()
+            decision.entity.casefold() for decision in entity_decisions if decision.entity.strip()
         }
         shared_across_entities = len(document_entities) > 1
         for ordinal, element in enumerate(parsed.elements):
             normalized = _clean(element.text)
             if not normalized:
                 continue
-            language = document.language if document.language != "und" else _detect_language(normalized)
+            language = (
+                document.language if document.language != "und" else _detect_language(normalized)
+            )
             context = " > ".join((document.title, *element.heading_path))
             searchable_metadata = _searchable_metadata(document, element, normalized)
             entity = entity_decisions[ordinal]
+            identifiers = element.metadata.get("identifiers") or sorted(
+                set(re.findall(r"\b[A-Z][A-Z0-9_]{2,}\b", normalized))
+            )
+            entity_key = _specific_entity_key(element.metadata, identifiers)
             page_number = _locator_page(element.locator)
             locator = (
                 attachment_locator(document, element, ordinal)
@@ -168,8 +182,7 @@ class StructuredDocumentChunker:
             related_assets = tuple(
                 asset
                 for asset in artifact.visual.assets
-                if asset.page_number == page_number
-                or (asset.page_number is None and ordinal == 0)
+                if asset.page_number == page_number or (asset.page_number is None and ordinal == 0)
             )
             visual_context = "\n".join(
                 value
@@ -182,12 +195,16 @@ class StructuredDocumentChunker:
                 if value
             )
             embedding_text = self._fit_embedding_text(
-                required=f"passage: {document.reference} {locator or ''}" if document.provider == "JIRA" else f"passage: {context}",
+                required=f"passage: {document.reference} {locator or ''}"
+                if document.provider == "JIRA"
+                else f"passage: {context}",
                 optional=(
                     f"SOURCE TYPE: {document.source_type}",
                     f"REFERENCE: {document.reference}",
                     f"LOCATION: {locator or 'source'}",
-                    jira_metadata_context(searchable_metadata) if document.provider == "JIRA" else _metadata_context(searchable_metadata),
+                    jira_metadata_context(searchable_metadata)
+                    if document.provider == "JIRA"
+                    else _metadata_context(searchable_metadata),
                     visual_context,
                 ),
                 body=normalized,
@@ -210,8 +227,8 @@ class StructuredDocumentChunker:
                 f"{document.project_id}|{document.provider}|{document.source_id}|"
                 f"{document.version}|{ordinal}|{digest}|{self._settings.chunker_version}"
             )
-            if document.provider == "JIRA":
-                identity = f"{document.project_id}|JIRA|{document.source_id}|{locator}|{digest}|jira-v2"
+            if document.provider in {"JIRA", "CONFLUENCE"}:
+                identity = f"{document.project_id}|{document.provider}|{document.source_id}|{locator}|{digest}|atlassian-v1"
             chunks.append(
                 SourceChunk(
                     chunk_id=hashlib.sha256(identity.encode("utf-8")).hexdigest(),
@@ -231,17 +248,25 @@ class StructuredDocumentChunker:
                     metadata={
                         **element.metadata,
                         **searchable_metadata,
-                        **({"original_locator": element.locator or ""} if document.provider == "JIRA" and document.source_type == "ATTACHMENT" else {}),
+                        **(
+                            {"original_locator": element.locator or ""}
+                            if document.provider == "JIRA" and document.source_type == "ATTACHMENT"
+                            else {}
+                        ),
                         "doc_category": element.metadata.get("doc_category") or category.category,
                         "entity": element.metadata.get("entity") or entity.entity,
-                        "entity_key": element.metadata.get("entity_key") or entity.entity,
+                        # `entity`/`application` are broad routing dimensions;
+                        # `entity_key` is reserved for a concrete registry,
+                        # workflow, event, or declared-symbol identifier.
+                        "entity_key": entity_key,
                         "application": entity.entity,
                         "shared_across_entities": shared_across_entities,
                         "entity_reason": element.metadata.get("entity_reason") or entity.reason,
-                        "category_reason": element.metadata.get("category_reason") or category.reason,
-                        "category_warning": element.metadata.get("category_warning") or category.warning,
-                        "identifiers": element.metadata.get("identifiers")
-                        or sorted(set(re.findall(r"\b[A-Z][A-Z0-9_]{2,}\b", normalized))),
+                        "category_reason": element.metadata.get("category_reason")
+                        or category.reason,
+                        "category_warning": element.metadata.get("category_warning")
+                        or category.warning,
+                        "identifiers": identifiers,
                         "chunk_profile": element.metadata.get("chunk_profile") or category.category,
                         "visual_asset_types": [asset.asset_type for asset in related_assets],
                         "visual_asset_captions": [asset.caption for asset in related_assets],
@@ -257,7 +282,12 @@ class StructuredDocumentChunker:
         for chunk in chunks:
             body_identity = chunk.content_hash
             if document.provider == "JIRA":
-                body_identity += ":" + str(chunk.metadata.get("jira_chunk_kind") or "") + ":" + str(chunk.metadata.get("event_id") or "")
+                body_identity += (
+                    ":"
+                    + str(chunk.metadata.get("jira_chunk_kind") or "")
+                    + ":"
+                    + str(chunk.metadata.get("event_id") or "")
+                )
                 if document.source_type == "ATTACHMENT":
                     body_identity += ":" + str(chunk.locator)
             if body_identity in seen_bodies:
@@ -275,9 +305,13 @@ class StructuredDocumentChunker:
         if document.content_bytes is not None:
             return self._docling_artifact(document)
         labels_value = document.metadata.get("labels") or ()
-        labels = tuple(str(value) for value in labels_value) if isinstance(
-            labels_value, (list, tuple, set)
-        ) else (str(labels_value),) if labels_value else ()
+        labels = (
+            tuple(str(value) for value in labels_value)
+            if isinstance(labels_value, (list, tuple, set))
+            else (str(labels_value),)
+            if labels_value
+            else ()
+        )
         category = detect_category(document.title, document.content, labels=labels)
         elements = tuple(
             LogicalElement(
@@ -314,7 +348,10 @@ class StructuredDocumentChunker:
             elements=elements,
         )
         path = str(document.metadata.get("path") or document.title)
-        is_markdown = Path(path).suffix.lower() in {".md", ".markdown"} or document.mime_type == "text/markdown"
+        is_markdown = (
+            Path(path).suffix.lower() in {".md", ".markdown"}
+            or document.mime_type == "text/markdown"
+        )
         if self._settings.visual_analysis_enabled and is_markdown:
             visual = analyze_markdown(document, self._settings)
         elif self._settings.visual_analysis_enabled and document.mime_type == "text/html":
@@ -340,9 +377,13 @@ class StructuredDocumentChunker:
         # and lost every heading and every table it had.
         decision = detect_format(document.content, declared=_declared_format(suffix, document))
         labels_value = document.metadata.get("labels") or ()
-        labels = tuple(str(value) for value in labels_value) if isinstance(
-            labels_value, (list, tuple, set)
-        ) else (str(labels_value),) if labels_value else ()
+        labels = (
+            tuple(str(value) for value in labels_value)
+            if isinstance(labels_value, (list, tuple, set))
+            else (str(labels_value),)
+            if labels_value
+            else ()
+        )
         category = detect_category(document.title, document.content, labels=labels)
         if category.category == "entity-contract" and decision.kind in {"markdown", "html"}:
             entity_values = tuple(self._entity_contract_values(document, decision.kind))
@@ -392,20 +433,21 @@ class StructuredDocumentChunker:
             re.IGNORECASE,
         )
         matches = list(heading.finditer(text))
-        if matches and text[:matches[0].start()].strip():
-            preamble = text[:matches[0].start()].strip()
-            for value in self._section_windows(
-                preamble, self._settings.chunk_max_tokens, 0
-            ):
-                yield value, (document.title,), "contract-support", {
-                    "chunk_profile": "entity-contract-support"
-                }
+        if matches and text[: matches[0].start()].strip():
+            preamble = text[: matches[0].start()].strip()
+            for value in self._section_windows(preamble, self._settings.chunk_max_tokens, 0):
+                yield (
+                    value,
+                    (document.title,),
+                    "contract-support",
+                    {"chunk_profile": "entity-contract-support"},
+                )
         for index, match in enumerate(matches):
             entity_key, conventional_id, entity_version, parenthesized_id = match.groups()
             entity_id = conventional_id or parenthesized_id
             section_heading = match.group(0).strip()
             end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-            section_body = text[match.end():end].strip()
+            section_body = text[match.end() : end].strip()
             section = f"{section_heading}\n{section_body}".strip()
             metadata = {
                 "entity_key": entity_key,
@@ -457,7 +499,9 @@ class StructuredDocumentChunker:
         metadata: dict[str, object],
     ):
         lines = [line for line in section_body.splitlines() if line.strip()]
-        table_start = next((index for index, line in enumerate(lines) if line.count("|") >= 2), None)
+        table_start = next(
+            (index for index, line in enumerate(lines) if line.count("|") >= 2), None
+        )
         if table_start is None or table_start + 2 > len(lines):
             for value in self._section_windows(
                 section_body,
@@ -474,13 +518,16 @@ class StructuredDocumentChunker:
                 0,
             ):
                 yield f"{section_heading}\n{value}", path, locator, metadata
-        header = lines[table_start:table_start + 2]
-        rows = lines[table_start + 2:]
+        header = lines[table_start : table_start + 2]
+        rows = lines[table_start + 2 :]
         prefix = [section_heading, *header]
         current = list(prefix)
         for row in rows:
             candidate = "\n".join([*current, row])
-            if len(current) > len(prefix) and self._count_tokens(candidate) > self._settings.chunk_max_tokens:
+            if (
+                len(current) > len(prefix)
+                and self._count_tokens(candidate) > self._settings.chunk_max_tokens
+            ):
                 yield "\n".join(current), path, locator, metadata
                 current = [*prefix, row]
             else:
@@ -506,11 +553,16 @@ class StructuredDocumentChunker:
         if not tables:
             return
         table_lines = {line for start, end in tables for line in range(start, end)}
-        prose = "\n".join(line for index, line in enumerate(lines) if index not in table_lines).strip()
+        prose = "\n".join(
+            line for index, line in enumerate(lines) if index not in table_lines
+        ).strip()
         for value in self._section_windows(prose, self._settings.chunk_max_tokens, 0):
-            yield value, (document.title,), "registry-support", {
-                "chunk_profile": "registry-support"
-            }
+            yield (
+                value,
+                (document.title,),
+                "registry-support",
+                {"chunk_profile": "registry-support"},
+            )
         for table_number, (start, end) in enumerate(tables, start=1):
             block = [line.strip() for line in lines[start:end] if line.strip()]
             if len(block) < 2:
@@ -541,29 +593,41 @@ class StructuredDocumentChunker:
             for row in rows:
                 key = row.strip().strip("|").split("|", 1)[0].strip().strip("`")
                 candidate = "\n".join([*current, row])
-                if len(current) > len(header) and self._count_tokens(candidate) > self._settings.table_chunk_max_tokens:
-                    yield "\n".join(current), (caption,), f"table:{table_number}", {
-                        **metadata, "row_keys": tuple(current_keys)
-                    }
+                if (
+                    len(current) > len(header)
+                    and self._count_tokens(candidate) > self._settings.table_chunk_max_tokens
+                ):
+                    yield (
+                        "\n".join(current),
+                        (caption,),
+                        f"table:{table_number}",
+                        {**metadata, "row_keys": tuple(current_keys)},
+                    )
                     current, current_keys = [*header, row], [key]
                 else:
                     current.append(row)
                     if key:
                         current_keys.append(key)
             if len(current) > len(header):
-                yield "\n".join(current), (caption,), f"table:{table_number}", {
-                    **metadata, "row_keys": tuple(current_keys)
-                }
+                yield (
+                    "\n".join(current),
+                    (caption,),
+                    f"table:{table_number}",
+                    {**metadata, "row_keys": tuple(current_keys)},
+                )
             if row_keys:
                 key_text = f"{caption} keys: " + ", ".join(row_keys)
-                for value in self._section_windows(
-                    key_text, self._settings.chunk_max_tokens, 0
-                ):
-                    yield value, (caption, "keys"), f"table:{table_number}:keys", {
-                        **metadata,
-                        "chunk_profile": "registry-key-list",
-                        "row_keys": row_keys,
-                    }
+                for value in self._section_windows(key_text, self._settings.chunk_max_tokens, 0):
+                    yield (
+                        value,
+                        (caption, "keys"),
+                        f"table:{table_number}:keys",
+                        {
+                            **metadata,
+                            "chunk_profile": "registry-key-list",
+                            "row_keys": row_keys,
+                        },
+                    )
 
     def _workflow_values(self, document: SourceDocument, kind: str):
         text = self._entity_contract_text(document.content, kind)
@@ -572,19 +636,22 @@ class StructuredDocumentChunker:
             re.IGNORECASE,
         )
         matches = list(heading.finditer(text))
-        if matches and text[:matches[0].start()].strip():
+        if matches and text[: matches[0].start()].strip():
             for value in self._section_windows(
-                text[:matches[0].start()].strip(),
+                text[: matches[0].start()].strip(),
                 self._settings.chunk_max_tokens,
                 0,
             ):
-                yield value, (document.title,), "workflow-support", {
-                    "chunk_profile": "workflow-support"
-                }
+                yield (
+                    value,
+                    (document.title,),
+                    "workflow-support",
+                    {"chunk_profile": "workflow-support"},
+                )
         for index, match in enumerate(matches):
             flow_id = match.group(1).upper()
             end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-            section = text[match.start():end].strip()
+            section = text[match.start() : end].strip()
             step_count = len(re.findall(r"(?m)^\s*\d+[.)]\s+", section))
             metadata = {
                 "chunk_profile": "workflow",
@@ -599,21 +666,19 @@ class StructuredDocumentChunker:
             flow_heading = lines[0].strip()
             body = "\n".join(lines[1:]).strip()
             heading_level = len(flow_heading) - len(flow_heading.lstrip("#"))
-            nested_heading = re.compile(
-                rf"(?m)^#{{{min(heading_level + 1, 6)},6}}\s+.+$"
-            )
+            nested_heading = re.compile(rf"(?m)^#{{{min(heading_level + 1, 6)},6}}\s+.+$")
             nested_matches = list(nested_heading.finditer(body))
             segments: list[str] = []
             if nested_matches:
-                if body[:nested_matches[0].start()].strip():
-                    segments.append(body[:nested_matches[0].start()].strip())
+                if body[: nested_matches[0].start()].strip():
+                    segments.append(body[: nested_matches[0].start()].strip())
                 for segment_index, nested in enumerate(nested_matches):
                     segment_end = (
                         nested_matches[segment_index + 1].start()
                         if segment_index + 1 < len(nested_matches)
                         else len(body)
                     )
-                    segments.append(body[nested.start():segment_end].strip())
+                    segments.append(body[nested.start() : segment_end].strip())
             elif body:
                 segments.append(body)
 
@@ -625,9 +690,7 @@ class StructuredDocumentChunker:
             for segment in segments:
                 segment_heading = re.match(r"^#{1,6}\s+(.+)$", segment)
                 path = (
-                    (flow_id, _clean(segment_heading.group(1)))
-                    if segment_heading
-                    else (flow_id,)
+                    (flow_id, _clean(segment_heading.group(1))) if segment_heading else (flow_id,)
                 )
                 candidate = f"{flow_heading}\n{segment}".strip()
                 if self._count_tokens(candidate) <= self._settings.chunk_max_tokens:
@@ -655,19 +718,25 @@ class StructuredDocumentChunker:
             for index, match in enumerate(matches):
                 term = _clean(match.group(1)).strip("`")
                 end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-                body = text[match.end():end].strip()
+                body = text[match.end() : end].strip()
                 if body:
-                    yield f"{term}: {body}", (term,), term, {
-                        "chunk_profile": "glossary", "term": term
-                    }
+                    yield (
+                        f"{term}: {body}",
+                        (term,),
+                        term,
+                        {"chunk_profile": "glossary", "term": term},
+                    )
             return
         for line in text.splitlines():
-            match = re.match(r"^\s*([^:]{2,80}):\s+(.+)$", line)
-            if match:
-                term, definition = (_clean(value) for value in match.groups())
-                yield f"{term}: {definition}", (term,), term, {
-                    "chunk_profile": "glossary", "term": term
-                }
+            line_match = re.match(r"^\s*([^:]{2,80}):\s+(.+)$", line)
+            if line_match:
+                term, definition = (_clean(value) for value in line_match.groups())
+                yield (
+                    f"{term}: {definition}",
+                    (term,),
+                    term,
+                    {"chunk_profile": "glossary", "term": term},
+                )
 
     def _docling_artifact(self, document: SourceDocument) -> StructuredArtifact:
         try:
@@ -696,7 +765,11 @@ class StructuredDocumentChunker:
                 tokenizer=embedding_tokenizer,
                 max_tokens=self._settings.chunk_max_tokens,
             )
-            artifacts_path = Path(self._settings.docling_artifacts_path) if self._settings.docling_artifacts_path else None
+            artifacts_path = (
+                Path(self._settings.docling_artifacts_path)
+                if self._settings.docling_artifacts_path
+                else None
+            )
             pdf_options = PdfPipelineOptions(
                 artifacts_path=artifacts_path,
                 enable_remote_services=False,
@@ -708,9 +781,7 @@ class StructuredDocumentChunker:
                 generate_table_images=self._settings.visual_analysis_enabled,
                 do_picture_classification=self._settings.visual_analysis_enabled,
                 ocr_options=TesseractCliOcrOptions(lang=["eng", "spa"]),
-                accelerator_options=AcceleratorOptions(
-                    num_threads=2, device=AcceleratorDevice.CPU
-                ),
+                accelerator_options=AcceleratorOptions(num_threads=2, device=AcceleratorDevice.CPU),
             )
             converter = DocumentConverter(
                 format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)}
@@ -724,14 +795,10 @@ class StructuredDocumentChunker:
             elements: list[LogicalElement] = []
             for chunk in chunker.chunk(dl_doc=converted):
                 headings = tuple(
-                    str(value)
-                    for value in (getattr(chunk.meta, "headings", None) or [])
-                    if value
+                    str(value) for value in (getattr(chunk.meta, "headings", None) or []) if value
                 )
                 captions = tuple(
-                    str(value)
-                    for value in (getattr(chunk.meta, "captions", None) or [])
-                    if value
+                    str(value) for value in (getattr(chunk.meta, "captions", None) or []) if value
                 )
                 locator = _docling_locator(chunk)
                 elements.append(
@@ -752,7 +819,8 @@ class StructuredDocumentChunker:
                 elements.extend(
                     LogicalElement(
                         kind="VISUAL",
-                        text=asset.caption or f"{asset.asset_type.replace('_', ' ')} on {asset.locator or 'document'}",
+                        text=asset.caption
+                        or f"{asset.asset_type.replace('_', ' ')} on {asset.locator or 'document'}",
                         locator=asset.locator,
                         metadata={"kind": "VISUAL"},
                     )
@@ -778,9 +846,7 @@ class StructuredDocumentChunker:
             document.content_bytes or b"", document.mime_type, document.title
         )
         if fallback is None:
-            raise RuntimeError(
-                "Docling worker dependencies are required for this document format."
-            )
+            raise RuntimeError("Docling worker dependencies are required for this document format.")
         fallback_document = SourceDocument(
             project_id=document.project_id,
             provider=document.provider,
@@ -797,7 +863,7 @@ class StructuredDocumentChunker:
             language=document.language,
             security_classification=document.security_classification,
         )
-        elements = tuple(
+        fallback_elements = tuple(
             LogicalElement(
                 kind=document.source_type,
                 text=content,
@@ -818,7 +884,7 @@ class StructuredDocumentChunker:
                 mime_type=document.mime_type,
                 language=document.language,
                 security_classification=document.security_classification,
-                elements=elements,
+                elements=fallback_elements,
                 warnings=("DOCLING_UNAVAILABLE_TEXT_FALLBACK",),
             ),
             visual=VisualAnalysis(False, reason_codes=("DOCLING_UNAVAILABLE",)),
@@ -830,8 +896,16 @@ class StructuredDocumentChunker:
             strip_headers=False,
         )
         for part in splitter.split_text(document.content):
-            path = tuple(str(part.metadata.get(key)) for key in ("h1", "h2", "h3", "h4") if part.metadata.get(key))
-            for value in self._section_windows(part.page_content, self._settings.chunk_max_tokens, self._settings.chunk_overlap_tokens):
+            path = tuple(
+                str(part.metadata.get(key))
+                for key in ("h1", "h2", "h3", "h4")
+                if part.metadata.get(key)
+            )
+            for value in self._section_windows(
+                part.page_content,
+                self._settings.chunk_max_tokens,
+                self._settings.chunk_overlap_tokens,
+            ):
                 yield value, path, None, {}
 
     def _code_values(self, document: SourceDocument, language: Language):
@@ -846,6 +920,54 @@ class StructuredDocumentChunker:
             keep_separator=True,
         )
         file_name = Path(str(document.metadata.get("path") or document.title)).name
+        if language == Language.KOTLIN:
+            enum_match = re.search(
+                r"(?m)^\s*(?:[A-Za-z]+\s+)*enum\s+class\s+([A-Za-z_][A-Za-z0-9_]*)",
+                document.content,
+            )
+            enum_name = enum_match.group(1) if enum_match else ""
+            registry_constants: set[str] = set()
+            for match in re.finditer(
+                r'(?m)^\s*([A-Z][A-Z0-9_]+)\s*\(\s*"([A-Z][A-Z0-9_]+)"\s*,\s*'
+                r'(\d+)\s*,\s*"([0-9]+(?:[.,][0-9]+)*)"\s*\)\s*[,;]',
+                document.content,
+            ):
+                constant, wire_name, entity_id, version = match.groups()
+                registry_constants.add(constant)
+                path = tuple(value for value in (file_name, enum_name, constant) if value)
+                yield (
+                    match.group(0).strip(),
+                    path,
+                    constant,
+                    {
+                        "symbol": constant,
+                        "symbols": [value for value in (enum_name, constant) if value],
+                        "file_name": file_name,
+                        "entity_key": wire_name,
+                        "entity_id": entity_id,
+                        "entity_version": version.replace(",", "."),
+                        "chunk_profile": "enum-registry",
+                    },
+                )
+            for enum_class, constant, serialized_name, evidence in _kotlin_enum_entries(
+                document.content
+            ):
+                if constant in registry_constants:
+                    continue
+                yield (
+                    evidence,
+                    tuple(value for value in (file_name, enum_class, constant) if value),
+                    constant,
+                    {
+                        "symbol": constant,
+                        "symbols": [enum_class, constant],
+                        "file_name": file_name,
+                        "entity_key": serialized_name or constant,
+                        "declaring_symbol": enum_class,
+                        "serialized_value": serialized_name,
+                        "chunk_profile": "enum-entry",
+                    },
+                )
         values = self._merge_code_fragments(
             splitter.split_text(document.content),
             self._settings.code_chunk_max_tokens,
@@ -854,16 +976,39 @@ class StructuredDocumentChunker:
             symbols = _code_symbols(value)
             symbol = symbols[0] if symbols else None
             heading_path = (file_name, *symbols[:2]) if file_name else tuple(symbols[:2])
-            yield value, heading_path, symbol, {
-                "symbol": symbol or "",
-                "symbols": list(symbols),
-                "file_name": file_name,
-            }
+            yield (
+                value,
+                heading_path,
+                symbol,
+                {
+                    "symbol": symbol or "",
+                    "symbols": list(symbols),
+                    "file_name": file_name,
+                },
+            )
+        if language == Language.KOTLIN:
+            for declaration in _kotlin_data_class_fields(document.content):
+                class_name, class_alias, field_name, serialized_name, field_type, evidence = (
+                    declaration
+                )
+                yield (
+                    evidence,
+                    tuple(value for value in (file_name, class_name, field_name) if value),
+                    field_name,
+                    {
+                        "symbol": field_name,
+                        "symbols": [class_name, field_name],
+                        "file_name": file_name,
+                        "entity_key": class_alias or class_name,
+                        "declaring_symbol": class_name,
+                        "field_name": field_name,
+                        "serialized_field": serialized_name,
+                        "field_type": field_type,
+                        "chunk_profile": "data-class-field",
+                    },
+                )
 
-
-    def _merge_code_fragments(
-        self, values: list[str], maximum_tokens: int
-    ) -> list[str]:
+    def _merge_code_fragments(self, values: list[str], maximum_tokens: int) -> list[str]:
         """Attach annotation/package/import-only splitter fragments to real code."""
 
         merged: list[str] = []
@@ -896,12 +1041,9 @@ class StructuredDocumentChunker:
         if not lines:
             return True
         structural = all(
-            line.startswith(("@", "package ", "import ", "//", "/*", "*", "*/"))
-            for line in lines
+            line.startswith(("@", "package ", "import ", "//", "/*", "*", "*/")) for line in lines
         )
-        return structural or (
-            len(value) < 48 and len(re.findall(r"[A-Za-z_]\w*", value)) <= 3
-        )
+        return structural or (len(value) < 48 and len(re.findall(r"[A-Za-z_]\w*", value)) <= 3)
 
     def _table_values(self, document: SourceDocument):
         lines = [line for line in document.content.splitlines() if line.strip()]
@@ -957,7 +1099,9 @@ class StructuredDocumentChunker:
         # No header to repeat here, but the budget is still a token budget: a
         # word-counted window of log or JSON lines overshot it badly, because
         # punctuation and identifiers dominate.
-        for index, value in enumerate(self._packed_lines(document.content.splitlines(), max_tokens)):
+        for index, value in enumerate(
+            self._packed_lines(document.content.splitlines(), max_tokens)
+        ):
             yield value, (), f"lines:{index + 1}", {}
 
     def _packed_lines(self, lines: Iterable[str], maximum: int) -> list[str]:
@@ -989,12 +1133,31 @@ class StructuredDocumentChunker:
         if isinstance(sections, list):
             for section in sections:
                 kind = section["kind"]
-                maximum = min(self._settings.chunk_max_tokens, 300 if kind in {"COMMENT", "CHANGELOG", "WORKLOG", "CUSTOM_FIELD", "RELATIONSHIP"} else 420)
-                for index, value in enumerate(self._prose_windows(section["text"], maximum, self._settings.chunk_overlap_tokens)):
-                    yield value, (document.reference, kind, section["locator"]), f"{section['locator']}:{index + 1}", {
-                        "kind": "JIRA_" + kind, "jira_chunk_kind": kind,
-                        **{k: v for k, v in section.items() if k not in {"kind", "text", "locator"}},
-                    }
+                maximum = min(
+                    self._settings.chunk_max_tokens,
+                    300
+                    if kind in {"COMMENT", "CHANGELOG", "WORKLOG", "CUSTOM_FIELD", "RELATIONSHIP"}
+                    else 420,
+                )
+                for index, value in enumerate(
+                    self._prose_windows(
+                        section["text"], maximum, self._settings.chunk_overlap_tokens
+                    )
+                ):
+                    yield (
+                        value,
+                        (document.reference, kind, section["locator"]),
+                        f"{section['locator']}:{index + 1}",
+                        {
+                            "kind": "JIRA_" + kind,
+                            "jira_chunk_kind": kind,
+                            **{
+                                k: v
+                                for k, v in section.items()
+                                if k not in {"kind", "text", "locator"}
+                            },
+                        },
+                    )
             return
         parts = re.split(r"(?m)^## ([^\n]+)\n", document.content)
         context = " · ".join(
@@ -1017,17 +1180,20 @@ class StructuredDocumentChunker:
             for index, value in enumerate(
                 self._prose_windows(content, maximum, self._settings.chunk_overlap_tokens)
             ):
-                yield value, (context, title), f"{title.lower()}:{index + 1}", {
-                    "kind": f"JIRA_{title.upper().replace(' ', '_')}"
-                }
+                yield (
+                    value,
+                    (context, title),
+                    f"{title.lower()}:{index + 1}",
+                    {"kind": f"JIRA_{title.upper().replace(' ', '_')}"},
+                )
 
     def _section_values(self, document: SourceDocument, max_tokens: int):
-        for index, value in enumerate(self._prose_windows(document.content, max_tokens, self._settings.chunk_overlap_tokens)):
+        for index, value in enumerate(
+            self._prose_windows(document.content, max_tokens, self._settings.chunk_overlap_tokens)
+        ):
             yield value, (), f"section:{index + 1}", {}
 
-    def _fit_embedding_text(
-        self, *, required: str, optional: tuple[str, ...], body: str
-    ) -> str:
+    def _fit_embedding_text(self, *, required: str, optional: tuple[str, ...], body: str) -> str:
         """Assemble the embedded passage without ever truncating the body.
 
         This previously took the first `chunk_max_tokens` window of
@@ -1090,11 +1256,7 @@ class StructuredDocumentChunker:
         tokens_per_chunk: int = 510,
         chunk_overlap: int = 0,
     ) -> SentenceTransformersTokenTextSplitter:
-        if (
-            tokens_per_chunk == 510
-            and chunk_overlap == 0
-            and self._sentence_splitter is not None
-        ):
+        if tokens_per_chunk == 510 and chunk_overlap == 0 and self._sentence_splitter is not None:
             return self._sentence_splitter
         if self._embedding_model is None:
             if self._embedding_model_loader is not None:
@@ -1251,6 +1413,25 @@ class StructuredDocumentChunker:
         ]
 
 
+def _specific_entity_key(metadata: dict[str, object], identifiers: object) -> str:
+    """Choose one high-confidence identifier; never substitute an app label."""
+
+    for field in ("entity_key", "event_id", "flow_id", "issue_key"):
+        value = str(metadata.get(field) or "").strip()
+        if value:
+            return value
+    values = identifiers if isinstance(identifiers, (list, tuple, set)) else ()
+    precise = [
+        str(value)
+        for value in values
+        if re.fullmatch(
+            r"(?:[A-Z][A-Z0-9]*_[A-Z0-9_]+|[A-Z][A-Z0-9]+-\d+)",
+            str(value),
+        )
+        and str(value) not in {"POS", "BOT", "IOT"}
+    ]
+    return precise[0] if len(precise) == 1 else ""
+
 
 def _html_list_text(node, *, ordered: bool) -> str:
     items = [
@@ -1282,10 +1463,7 @@ def _html_table_text(table) -> str:
 
     rows: list[str] = []
     for row in table.find_all("tr"):
-        cells = [
-            " ".join(cell.get_text(" ").split())
-            for cell in row.find_all(["th", "td"])
-        ]
+        cells = [" ".join(cell.get_text(" ").split()) for cell in row.find_all(["th", "td"])]
         if any(cells):
             rows.append(" | ".join(cells))
     if not rows:
@@ -1300,8 +1478,6 @@ def _html_table_markdown(table) -> str:
     """Render preserved HTML tables as parseable Markdown evidence."""
 
     return _html_table_text(table)
-
-
 
 
 def _declared_format(suffix: str, document: SourceDocument) -> str | None:
@@ -1334,9 +1510,7 @@ def _blocks(value: str) -> list[tuple[bool, list[str]]]:
         else:
             blocks.append((is_row, [line]))
     # A lone row is not a table: it is a sentence that happens to contain pipes.
-    return [
-        (is_row and len(lines) > 1, lines) for is_row, lines in blocks
-    ]
+    return [(is_row and len(lines) > 1, lines) for is_row, lines in blocks]
 
 
 def _table_header(lines: list[str]) -> tuple[list[str], list[str]]:
@@ -1353,9 +1527,7 @@ def _join(header: str, rows: list[str]) -> str:
     return "\n".join(([header] if header else []) + rows).strip()
 
 
-def _wide_row_windows(
-    header_lines: list[str], row: str, available: int, count_tokens
-) -> list[str]:
+def _wide_row_windows(header_lines: list[str], row: str, available: int, count_tokens) -> list[str]:
     """Split one oversized row by columns, keeping each part labelled.
 
     A row that cannot fit even alone would otherwise be truncated at embedding
@@ -1431,14 +1603,129 @@ def _code_symbols(value: str) -> tuple[str, ...]:
         r"annotation|value|inline|tailrec|suspend|operator|infix|override|actual|"
         r"expect|final|external)\s+)*"
     )
-    return tuple(dict.fromkeys(
+    declared = [
         match.group(1)
         for match in re.finditer(
-        rf"(?m)^\s*(?:async\s+)?{modifiers}"
-        r"(?:class|interface|object|def|fun|function)\s+([A-Za-z_][A-Za-z0-9_]*)",
-        value,
+            rf"(?m)^\s*(?:async\s+)?{modifiers}"
+            r"(?:class|interface|object|def|fun|function)\s+([A-Za-z_][A-Za-z0-9_]*)",
+            value,
         )
-    ))
+    ]
+    properties = [
+        match.group(1)
+        for match in re.finditer(
+            r"(?m)^\s*(?:(?:public|private|protected|internal|override|const|lateinit)\s+)*"
+            r"(?:val|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::|=)",
+            value,
+        )
+    ]
+    enum_entries = [
+        match.group(1)
+        for match in re.finditer(r"(?m)^\s*([A-Z][A-Z0-9_]+)\s*(?:\([^\n]*\))?\s*[,;]", value)
+    ]
+    return tuple(dict.fromkeys((*declared, *properties, *enum_entries)))
+
+
+def _balanced_delimiter_body(value: str, start: int, opening: str, closing: str) -> str:
+    """Return one balanced declaration body, ignoring delimiters inside strings."""
+
+    depth = 0
+    quote = ""
+    escaped = False
+    for index in range(start, len(value)):
+        character = value[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = ""
+            continue
+        if character in {'"', "'"}:
+            quote = character
+        elif character == opening:
+            depth += 1
+        elif character == closing:
+            depth -= 1
+            if depth == 0:
+                return value[start + 1 : index]
+    return ""
+
+
+def _kotlin_data_class_fields(
+    value: str,
+) -> tuple[tuple[str, str, str, str, str, str], ...]:
+    fields: list[tuple[str, str, str, str, str, str]] = []
+    pattern = re.compile(
+        r"(?m)^[ \t]*(?:(?:public|private|protected|internal)[ \t]+)?"
+        r"data[ \t]+class[ \t]+"
+        r"(?P<class>[A-Za-z_][A-Za-z0-9_]*)\s*\("
+    )
+    for declaration in pattern.finditer(value):
+        class_name = declaration.group("class")
+        aliases = re.findall(
+            r'@SerialName\("([^"]+)"\)',
+            _leading_kotlin_annotations(value, declaration.start()),
+        )
+        class_alias = aliases[-1] if aliases else ""
+        body = _balanced_delimiter_body(value, declaration.end() - 1, "(", ")")
+        if not body:
+            continue
+        for field in re.finditer(
+            r'(?m)(?:@SerialName\("([^"]+)"\)\s*)?'
+            r"(?:(?:override|private|public|protected|internal)\s+)*"
+            r"(?:val|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^,\n=)]+)",
+            body,
+        ):
+            serialized_name, field_name, field_type = field.groups()
+            evidence = field.group(0).strip().rstrip(",")
+            fields.append(
+                (
+                    class_name,
+                    class_alias,
+                    field_name,
+                    serialized_name or field_name,
+                    field_type.strip(),
+                    evidence,
+                )
+            )
+    return tuple(fields)
+
+
+def _leading_kotlin_annotations(value: str, declaration_start: int) -> str:
+    """Return contiguous annotation lines immediately before a declaration."""
+
+    annotations: list[str] = []
+    for line in reversed(value[:declaration_start].splitlines()):
+        if not line.strip().startswith("@"):
+            break
+        annotations.append(line)
+    return "\n".join(reversed(annotations))
+
+
+def _kotlin_enum_entries(value: str) -> tuple[tuple[str, str, str, str], ...]:
+    entries: list[tuple[str, str, str, str]] = []
+    for declaration in re.finditer(
+        r"(?m)^\s*(?:(?:public|private|protected|internal)\s+)?enum\s+class\s+"
+        r"([A-Za-z_][A-Za-z0-9_]*)[^\{]*\{",
+        value,
+    ):
+        enum_name = declaration.group(1)
+        body = _balanced_delimiter_body(value, declaration.end() - 1, "{", "}")
+        if not body:
+            continue
+        entries_body = body.split(";", 1)[0]
+        for entry in re.finditer(
+            r'(?m)^\s*(?:@SerialName\("([^"]+)"\)\s*)?'
+            r"([A-Z][A-Z0-9_]+)\s*(?:\([^\n]*\))?\s*,?\s*$",
+            entries_body,
+        ):
+            serialized_name, constant = entry.groups()
+            entries.append(
+                (enum_name, constant, serialized_name or constant, entry.group(0).strip())
+            )
+    return tuple(entries)
 
 
 _KEYWORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./:#-]{2,}")
@@ -1548,8 +1835,7 @@ def _detect_language(value: str) -> str:
         for word in ("el", "la", "los", "las", "de", "del", "que", "para", "con", "como", "se")
     )
     english = sum(
-        words.count(word)
-        for word in ("the", "a", "of", "that", "for", "with", "how", "is")
+        words.count(word) for word in ("the", "a", "of", "that", "for", "with", "how", "is")
     )
     if spanish > english:
         return "es"

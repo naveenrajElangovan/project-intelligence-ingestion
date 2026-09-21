@@ -8,7 +8,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, *, hsts: bool) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, app: ASGIApp, *, hsts: bool) -> None:
         super().__init__(app)
         self._hsts = hsts
 

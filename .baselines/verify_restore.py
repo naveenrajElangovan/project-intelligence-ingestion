@@ -45,8 +45,10 @@ def live():
         pid = (c.get("metadata") or {}).get("project_id") or c["name"]
         metas, offset = [], 0
         while True:
-            page = _get(f"{BASE}/{c['id']}/get",
-                        {"limit": 2000, "offset": offset, "include": ["metadatas"]})
+            page = _get(
+                f"{BASE}/{c['id']}/get",
+                {"limit": 2000, "offset": offset, "include": ["metadatas"]},
+            )
             m = page.get("metadatas") or []
             if not m:
                 break
@@ -54,7 +56,7 @@ def live():
             offset += 2000
             if len(m) < 2000:
                 break
-        counts = lambda f: {str(x.get(f, "")): 0 for x in metas}
+
         def by(field):
             acc = {}
             for x in metas:
@@ -120,5 +122,10 @@ def main(path):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else
-                  ".baselines/chroma-baseline-2026-09-07.json"))
+    sys.exit(
+        main(
+            sys.argv[1]
+            if len(sys.argv) > 1
+            else ".baselines/chroma-baseline-2026-09-07.json"
+        )
+    )

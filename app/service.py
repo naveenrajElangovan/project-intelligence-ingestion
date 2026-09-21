@@ -1,9 +1,11 @@
+import asyncio
 import hashlib
 import logging
 import mimetypes
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal, cast
 from uuid import uuid4
 
 from app.access_rules import resolve_access_policy
@@ -22,6 +24,10 @@ from app.visual import resolve_markdown_asset_paths
 from app.workflow import DocumentIngestionWorkflow
 
 logger = logging.getLogger(__name__)
+
+
+class IngestionAlreadyRunning(RuntimeError):
+    """Raised when a provider scope is protected by an active ingestion lease."""
 
 
 def _github_manifest_is_unchanged(
@@ -76,7 +82,7 @@ class IngestionService:
                 vector_store=replace(
                     project.vector_store,
                     collection_name=target_collection_name,
-                    schema_version=target_schema_version,
+                    schema_version=cast(Literal["3"], target_schema_version),
                 ),
             )
         requested = {value.upper() for value in providers}
@@ -95,20 +101,157 @@ class IngestionService:
             project.atlassian.resource_url,
         )
         if "JIRA" in requested:
-            for mapping in project.jira_projects:
-                scope = f"{mapping.site_url}|{mapping.project_key}"
+            for jira_mapping in project.jira_projects:
+                scope = f"{jira_mapping.site_url}|{jira_mapping.project_key}"
                 if target_collection_name:
                     scope = f"staging:{target_collection_name}|{scope}"
                 cursor = await self._cursor(project_id, "JIRA", scope, full)
-                documents = client.jira_documents(project_id, mapping, cursor)
+                documents = client.jira_documents(project_id, jira_mapping, cursor)
                 results.append(await self._run_scope(project, "JIRA", scope, documents, full))
         if "CONFLUENCE" in requested:
-            for mapping in project.confluence_spaces:
-                scope = f"{mapping.site_url}|{mapping.space_id}"
+            for confluence_mapping in project.confluence_spaces:
+                scope = f"{confluence_mapping.site_url}|{confluence_mapping.space_id}"
                 cursor = await self._cursor(project_id, "CONFLUENCE", scope, full)
-                documents = client.confluence_documents(project_id, mapping, cursor)
+                documents = client.confluence_documents(project_id, confluence_mapping, cursor)
                 results.append(await self._run_scope(project, "CONFLUENCE", scope, documents, full))
         return tuple(results)
+
+    async def ingest_atlassian_resource(
+        self,
+        *,
+        project_id: str,
+        provider: str,
+        cloud_id: str,
+        resource_id: str,
+        child_resource_id: str | None,
+        resource_type: str,
+        project_or_space_id: str,
+        deleted: bool = False,
+        child_deleted: bool = False,
+    ) -> ProviderIngestionResult:
+        project = await self._projects.get(project_id)
+        if project is None or project.atlassian is None:
+            raise LookupError("The active Atlassian project mapping does not exist.")
+        if project.atlassian.cloud_id != cloud_id:
+            raise ValueError("The event cloud does not match the configured Atlassian connection.")
+        client = AtlassianSourceClient(
+            self._settings,
+            self._projects,
+            project.project_id,
+            project.atlassian.cloud_id,
+            project.atlassian.resource_url,
+        )
+        normalized = provider.upper()
+        if normalized == "JIRA":
+            jira_mapping = next(
+                (
+                    value
+                    for value in project.jira_projects
+                    if value.project_key == project_or_space_id
+                ),
+                None,
+            )
+            if jira_mapping is None:
+                raise LookupError("The Jira project is not mapped to this application project.")
+            scope = f"{jira_mapping.site_url}|{jira_mapping.project_key}"
+            source_id = f"jira:{cloud_id}:issue:{resource_id}"
+            documents = client.jira_resource_documents(project_id, jira_mapping, resource_id)
+        elif normalized == "CONFLUENCE":
+            confluence_mapping = next(
+                (
+                    value
+                    for value in project.confluence_spaces
+                    if value.space_id == project_or_space_id
+                ),
+                None,
+            )
+            if confluence_mapping is None:
+                raise LookupError("The Confluence space is not mapped to this application project.")
+            scope = f"{confluence_mapping.site_url}|{confluence_mapping.space_id}"
+            source_id = f"page:{resource_id}"
+            documents = client.confluence_resource_documents(
+                project_id, confluence_mapping, resource_id
+            )
+        else:
+            raise ValueError("Targeted ingestion supports Jira and Confluence only.")
+        if deleted:
+            manifest = await self._manifests.get_manifest(project_id, normalized, scope, source_id)
+            if manifest is None:
+                return ProviderIngestionResult(project_id, normalized, 0, 0, 1, 0, 0, 0)
+            result = await self._workflow.delete_manifest(
+                manifest, uuid4().hex, project.vector_store
+            )
+            await self._refresh_project_vocabulary(project)
+            return ProviderIngestionResult(
+                project_id, normalized, 1, 0, 0, int(result.operation == "DELETED"), 0, 0
+            )
+        if child_deleted and child_resource_id and resource_type.upper() == "ATTACHMENT":
+            child_source_id = (
+                f"jira:{cloud_id}:attachment:{child_resource_id}"
+                if normalized == "JIRA"
+                else f"attachment:{child_resource_id}"
+            )
+            child_manifest = await self._manifests.get_manifest(
+                project_id, normalized, scope, child_source_id
+            )
+            if child_manifest is not None:
+                await self._workflow.delete_manifest(
+                    child_manifest, uuid4().hex, project.vector_store
+                )
+        return await self._run_targeted_scope(project, normalized, scope, documents)
+
+    async def _run_targeted_scope(
+        self, project: IngestionProject, provider: str, scope: str, documents
+    ) -> ProviderIngestionResult:
+        owner = uuid4().hex
+        if not await self._manifests.acquire_scope_lease(
+            project.project_id, provider, scope, owner, self._settings.scope_lease_seconds
+        ):
+            raise IngestionAlreadyRunning(
+                f"An ingestion is already running for {provider} scope {scope}."
+            )
+        discovered = indexed = unchanged = failed = chunks_written = 0
+        heartbeat = asyncio.create_task(
+            self._renew_scope_lease(project.project_id, provider, scope, owner)
+        )
+        try:
+            scan_id = uuid4().hex
+            async for document in documents:
+                discovered += 1
+                try:
+                    result = await self._workflow.run(
+                        document,
+                        scope,
+                        scan_id,
+                        project.vector_store,
+                        source_access_rules=project.source_access_rules,
+                    )
+                    if result.operation == "INDEXED":
+                        indexed += 1
+                        chunks_written += result.chunks_written
+                    else:
+                        unchanged += 1
+                except Exception:
+                    failed += 1
+                    raise
+            await self._refresh_project_vocabulary(project)
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+            await self._manifests.release_scope_lease(project.project_id, provider, scope, owner)
+        return ProviderIngestionResult(
+            project.project_id,
+            provider,
+            discovered,
+            indexed,
+            unchanged,
+            0,
+            failed,
+            chunks_written,
+        )
 
     async def _ingest_github(
         self, project: IngestionProject, full: bool
@@ -288,7 +431,7 @@ class IngestionService:
                         project.project_id, "GITHUB", scope, datetime.now(UTC)
                     )
                     await self._refresh_project_vocabulary(project)
-                result = ProviderIngestionResult(
+                scope_result = ProviderIngestionResult(
                     project_id=project.project_id,
                     provider="GITHUB",
                     discovered=discovered,
@@ -303,7 +446,7 @@ class IngestionService:
                     visual_assets_stored=visual_assets,
                     visual_processing_failures=visual_failures,
                 )
-                results.append(result)
+                results.append(scope_result)
                 logger.info(
                     "ingestion_scope_complete event=ingestion_scope_complete project_id=%s "
                     "provider=GITHUB repository=%s branch=%s commit_sha=%s discovered=%s "
@@ -345,11 +488,45 @@ class IngestionService:
         if not await self._manifests.acquire_scope_lease(
             project.project_id, provider, scope, owner, self._settings.scope_lease_seconds
         ):
-            raise RuntimeError(f"An ingestion is already running for {provider} scope {scope}.")
+            raise IngestionAlreadyRunning(
+                f"An ingestion is already running for {provider} scope {scope}."
+            )
+        heartbeat = asyncio.create_task(
+            self._renew_scope_lease(project.project_id, provider, scope, owner)
+        )
         try:
             return await self._run_scope_unlocked(project, provider, scope, documents, full)
         finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
             await self._manifests.release_scope_lease(project.project_id, provider, scope, owner)
+
+    async def _renew_scope_lease(
+        self, project_id: str, provider: str, scope: str, owner: str
+    ) -> None:
+        renew = getattr(self._manifests, "renew_scope_lease", None)
+        if renew is None:
+            return
+        interval = max(1.0, self._settings.scope_lease_seconds / 3)
+        while True:
+            await asyncio.sleep(interval)
+            if not await renew(
+                project_id,
+                provider,
+                scope,
+                owner,
+                self._settings.scope_lease_seconds,
+            ):
+                logger.error(
+                    "scope_lease_lost project_id=%s provider=%s scope=%s",
+                    project_id,
+                    provider,
+                    scope,
+                )
+                return
 
     async def _run_scope_unlocked(
         self,

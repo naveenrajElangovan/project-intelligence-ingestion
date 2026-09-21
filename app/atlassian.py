@@ -1,7 +1,7 @@
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -41,6 +41,47 @@ class AtlassianSourceClient:
         async for document in reader.documents(project_id, mapping, updated_since):
             yield document
 
+    async def jira_resource_documents(
+        self, project_id: str, mapping: JiraMapping, issue_id: str
+    ) -> AsyncIterator[SourceDocument]:
+        from app.jira import JiraReader
+
+        for document in await JiraReader(self).resource_documents(project_id, mapping, issue_id):
+            yield document
+
+    async def confluence_resource_documents(
+        self, project_id: str, mapping: ConfluenceMapping, page_id: str
+    ) -> AsyncIterator[SourceDocument]:
+        origin = f"https://api.atlassian.com/ex/confluence/{self._cloud_id}"
+        response = await self._get(
+            f"{origin}/wiki/api/v2/pages/{page_id}",
+            {"body-format": "storage"},
+        )
+        response.raise_for_status()
+        page = response.json()
+        if not isinstance(page, dict):
+            raise RuntimeError("Confluence returned an invalid page response.")
+        space_id = str(page.get("spaceId") or _mapping(page.get("space")).get("id") or "")
+        if space_id != mapping.space_id:
+            raise RuntimeError("Confluence page is outside the configured space.")
+        if mapping.root_page_ids:
+            pages = await self._confluence_pages(origin, mapping)
+            pages_by_id = {str(value.get("id") or ""): value for value in pages}
+            page = pages_by_id.get(str(page_id), page)
+            if not _inside_v2_roots(page, mapping, pages_by_id):
+                raise RuntimeError("Confluence page is outside the configured root tree.")
+        page["labels"] = await self._confluence_labels(origin, str(page_id))
+        document = _confluence_page(project_id, mapping, page)
+        if not document.content.strip():
+            document = await self._confluence_live_body(origin, project_id, mapping, page)
+        yield document
+        async for attachment in self._confluence_page_attachments(origin, str(page_id)):
+            attachment_document = await self._confluence_attachment(
+                origin, project_id, mapping, attachment
+            )
+            if attachment_document:
+                yield attachment_document
+
     async def confluence_documents(
         self,
         project_id: str,
@@ -69,11 +110,11 @@ class AtlassianSourceClient:
             async for attachment in self._confluence_page_attachments(origin, page_id):
                 if not _on_or_after(_confluence_updated_at(attachment), updated_since):
                     continue
-                document = await self._confluence_attachment(
+                attachment_document = await self._confluence_attachment(
                     origin, project_id, mapping, attachment
                 )
-                if document:
-                    yield document
+                if attachment_document:
+                    yield attachment_document
 
     async def _confluence_pages(
         self, origin: str, mapping: ConfluenceMapping
@@ -238,10 +279,8 @@ class AtlassianSourceClient:
         mapping: ConfluenceMapping,
         content: dict[str, Any],
     ) -> SourceDocument | None:
-        extensions = (
-            content.get("extensions") if isinstance(content.get("extensions"), dict) else {}
-        )
-        metadata = content.get("metadata") if isinstance(content.get("metadata"), dict) else {}
+        extensions = _mapping(content.get("extensions"))
+        metadata = _mapping(content.get("metadata"))
         size = _integer(content.get("fileSize")) or _integer(extensions.get("fileSize"))
         if size is not None and size > self._settings.max_attachment_bytes:
             return None
@@ -249,7 +288,7 @@ class AtlassianSourceClient:
         media_type = str(
             metadata.get("mediaType") or content.get("mediaType") or "application/octet-stream"
         )
-        links = content.get("_links") if isinstance(content.get("_links"), dict) else {}
+        links = _mapping(content.get("_links"))
         download = str(content.get("downloadLink") or links.get("download") or "")
         if not download:
             return None
@@ -259,8 +298,8 @@ class AtlassianSourceClient:
         if len(response.content) > self._settings.max_attachment_bytes:
             return None
         content_id = str(content.get("id") or "")
-        version = content.get("version") if isinstance(content.get("version"), dict) else {}
-        container = content.get("container") if isinstance(content.get("container"), dict) else {}
+        version = _mapping(content.get("version"))
+        container = _mapping(content.get("container"))
         updated_at = _confluence_updated_at(content)
         return SourceDocument(
             project_id=project_id,
@@ -297,10 +336,10 @@ class AtlassianSourceClient:
 def _jira_issue(project_id: str, mapping: JiraMapping, issue: dict[str, Any]) -> SourceDocument:
     issue_id = str(issue.get("id") or "")
     key = str(issue.get("key") or issue_id)
-    fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
+    fields = _mapping(issue.get("fields"))
     summary = str(fields.get("summary") or key)
-    comments = fields.get("comment") if isinstance(fields.get("comment"), dict) else {}
-    comment_values = comments.get("comments") if isinstance(comments.get("comments"), list) else []
+    comments = _mapping(fields.get("comment"))
+    comment_values = _items(comments.get("comments"))
     description = _adf_text(fields.get("description"))
     comment_text = "\n\n".join(
         _adf_text(comment.get("body"))
@@ -352,7 +391,9 @@ def _jira_issue(project_id: str, mapping: JiraMapping, issue: dict[str, Any]) ->
             "priority": _nested_name(fields.get("priority")),
             "assignee": _nested_display_name(fields.get("assignee")),
             "reporter": _nested_display_name(fields.get("reporter")),
-            "labels": [str(value) for value in fields.get("labels", []) if isinstance(value, str)],
+            "labels": [
+                str(value) for value in _items(fields.get("labels")) if isinstance(value, str)
+            ],
             "due_date": str(fields.get("duedate") or ""),
         },
     )
@@ -388,7 +429,7 @@ def _adf_blocks(node: dict[str, Any]) -> list[str]:
     """Flatten ADF into block-level lines, preserving headings and table rows."""
 
     kind = str(node.get("type") or "")
-    children = node.get("content") if isinstance(node.get("content"), list) else []
+    children = _items(node.get("content"))
 
     if kind == "text":
         return [str(node.get("text") or "")]
@@ -401,7 +442,7 @@ def _adf_blocks(node: dict[str, Any]) -> list[str]:
                 continue
             cells = [
                 " ".join(" ".join(_adf_blocks(cell)).split())
-                for cell in (row.get("content") or [])
+                for cell in _items(row.get("content"))
                 if isinstance(cell, dict)
             ]
             if any(cells):
@@ -415,9 +456,7 @@ def _adf_blocks(node: dict[str, Any]) -> list[str]:
         if not collapsed:
             return []
         if kind == "heading":
-            level = (
-                node.get("attrs", {}).get("level") if isinstance(node.get("attrs"), dict) else None
-            )
+            level = _mapping(node.get("attrs")).get("level")
             hashes = "#" * int(level or 1)
             # Markdown heading syntax so the heading splitter can see structure,
             # which is what populates structure_path.
@@ -444,9 +483,9 @@ def _confluence_page(
 ) -> SourceDocument:
     content_id = str(content.get("id") or "")
     title = str(content.get("title") or content_id)
-    body = content.get("body") if isinstance(content.get("body"), dict) else {}
-    storage = body.get("storage") if isinstance(body.get("storage"), dict) else {}
-    version = content.get("version") if isinstance(content.get("version"), dict) else {}
+    body = _mapping(content.get("body"))
+    storage = _mapping(body.get("storage"))
+    version = _mapping(content.get("version"))
     raw_html = str(storage.get("value") or "")
     # Routing in the chunker is by mime type, and the ADF fallback produces
     # Markdown rather than HTML. Left as text/html it would reach the HTML path,
@@ -477,7 +516,7 @@ def _confluence_page(
             "page_id": content_id,
             "status": str(content.get("status") or ""),
             "labels": tuple(
-                str(label) for label in content.get("labels", []) if str(label).strip()
+                str(label) for label in _items(content.get("labels")) if str(label).strip()
             ),
         },
         mime_type=mime_type,
@@ -535,7 +574,7 @@ def _next_url(origin: str, payload: object) -> str | None:
 
 
 def _confluence_updated_at(content: dict[str, Any]) -> datetime | None:
-    version = content.get("version") if isinstance(content.get("version"), dict) else {}
+    version = _mapping(content.get("version"))
     return _datetime(version.get("createdAt") or version.get("when") or content.get("createdAt"))
 
 
@@ -544,7 +583,7 @@ def _on_or_after(value: datetime | None, threshold: datetime | None) -> bool:
 
 
 def _confluence_url(site_url: str, content: dict[str, Any]) -> str:
-    links = content.get("_links") if isinstance(content.get("_links"), dict) else {}
+    links = _mapping(content.get("_links"))
     web_ui = str(links.get("webui") or "")
     if web_ui:
         return f"{site_url.rstrip('/')}/wiki{web_ui}"
@@ -589,10 +628,18 @@ def _datetime(value: object) -> datetime | None:
 
 def _integer(value: object) -> int | None:
     try:
-        return int(value) if value is not None else None
+        return int(cast(Any, value)) if value is not None else None
     except (TypeError, ValueError):
         return None
 
 
 def _jql(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
+
+
+def _items(value: object) -> list[Any]:
+    return cast(list[Any], value) if isinstance(value, list) else []

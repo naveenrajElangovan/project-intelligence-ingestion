@@ -28,9 +28,9 @@ import os
 try:
     from app.config import get_settings
     from app.control_plane import BackendControlPlaneClient
+    from app.dependencies import get_vector_store
     from app.projects import IngestionProject
     from app.state import AzureTableManifestStore
-    from app.dependencies import get_vector_store
 except ModuleNotFoundError as error:  # pragma: no cover - interpreter guidance
     # A bare `python3 -m scripts.purge_provider` uses the system interpreter,
     # where none of the dependencies are installed, and the resulting traceback

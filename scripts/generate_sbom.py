@@ -1,8 +1,8 @@
 """Generate a deterministic CycloneDX package inventory for the built image."""
 
 import argparse
-from importlib.metadata import distributions
 import json
+from importlib.metadata import distributions
 from pathlib import Path
 
 
@@ -34,4 +34,3 @@ if __name__ == "__main__":
     parser.add_argument("output", type=Path)
     arguments = parser.parse_args()
     arguments.output.write_text(json.dumps(build(), sort_keys=True), encoding="utf-8")
-

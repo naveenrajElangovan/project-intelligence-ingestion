@@ -3,17 +3,17 @@ repos:
     hooks:
       - id: ruff-lint
         name: ruff lint
-        entry: python tools/check_ruff_ratchet.py lint
+        entry: python -m ruff check app tests scripts tools
         language: system
         pass_filenames: false
       - id: ruff-format
         name: ruff format
-        entry: python tools/check_ruff_ratchet.py format
+        entry: python -m ruff format --check app tests scripts tools
         language: system
         pass_filenames: false
-      - id: mypy-ratchet
-        name: mypy ratchet
-        entry: python tools/check_mypy_ratchet.py
+      - id: mypy
+        name: mypy application check
+        entry: python -m mypy app
         language: system
         pass_filenames: false
         types: [python]
@@ -23,3 +23,8 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
+      - id: dependency-usage
+        name: dependency usage
+        entry: python -m deptry . --exclude '.venv|\.git|corpora|\.quality-runs' --optional-dependencies-dev-groups dev --per-rule-ignores DEP002=uvicorn,DEP004=pytest
+        language: system
+        pass_filenames: false

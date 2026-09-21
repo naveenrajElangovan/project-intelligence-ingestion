@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections import defaultdict
 import json
+from collections import defaultdict
 
 from app.config import get_settings
 from app.state import AzureTableManifestStore

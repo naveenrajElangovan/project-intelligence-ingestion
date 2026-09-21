@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import logging
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 from prometheus_client import REGISTRY, Counter, Gauge, Histogram
 from prometheus_client import push_to_gateway as _push_to_gateway
 
-
 LOGGER = logging.getLogger("project_intelligence.ingestion.telemetry")
 
-_JIRA_READS = Counter("pi_ingestion_jira_reads_total", "Jira API reads by bounded resource and outcome.", ("resource", "outcome"))
-_JIRA_READ_DURATION = Histogram("pi_ingestion_jira_read_duration_seconds", "Jira API read duration including gateway validation.", ("resource",))
-_JIRA_ITEMS = Counter("pi_ingestion_jira_source_items_total", "Collected or excluded Jira source items.", ("kind",))
+_JIRA_READS = Counter(
+    "pi_ingestion_jira_reads_total",
+    "Jira API reads by bounded resource and outcome.",
+    ("resource", "outcome"),
+)
+_JIRA_READ_DURATION = Histogram(
+    "pi_ingestion_jira_read_duration_seconds",
+    "Jira API read duration including gateway validation.",
+    ("resource",),
+)
+_JIRA_ITEMS = Counter(
+    "pi_ingestion_jira_source_items_total", "Collected or excluded Jira source items.", ("kind",)
+)
 
 
 def record_jira_read(resource: str, outcome: str, seconds: float) -> None:
@@ -128,6 +137,4 @@ def observe_scope(provider: str, *, full: bool) -> Iterator[None]:
         _LAST_SUCCESS.labels(provider_label).set_to_current_time()
     finally:
         _ACTIVE_SCOPES.labels(provider_label).dec()
-        _SCOPE_DURATION.labels(provider_label, mode).observe(
-            max(0.0, time.perf_counter() - began)
-        )
+        _SCOPE_DURATION.labels(provider_label, mode).observe(max(0.0, time.perf_counter() - began))

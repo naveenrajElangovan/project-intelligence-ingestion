@@ -4,7 +4,7 @@ from app.config import get_settings
 from app.control_plane import BackendControlPlaneClient
 from app.embedding import build_passage_embedder
 from app.service import IngestionService
-from app.state import AzureTableManifestStore
+from app.state import AzureTableManifestStore, ManifestStore, MongoManifestStore
 from app.vector import ChromaVectorStore
 from app.workflow import DocumentIngestionWorkflow
 
@@ -18,14 +18,19 @@ def get_project_reader() -> BackendControlPlaneClient:
 def get_vector_store() -> ChromaVectorStore:
     settings = get_settings()
     return ChromaVectorStore(
-        settings.chroma_host, settings.chroma_port, settings.chroma_collection,
+        settings.chroma_host,
+        settings.chroma_port,
+        settings.chroma_collection,
         build_passage_embedder(settings),
     )
 
 
 @lru_cache
-def get_manifest_store() -> AzureTableManifestStore:
-    return AzureTableManifestStore.from_settings(get_settings())
+def get_manifest_store() -> ManifestStore:
+    settings = get_settings()
+    if settings.state_backend == "MONGODB":
+        return MongoManifestStore.from_settings(settings)
+    return AzureTableManifestStore.from_settings(settings)
 
 
 @lru_cache

@@ -32,27 +32,41 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import dataclass
 import hashlib
 import mimetypes
-from pathlib import Path
 import sys
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 
 from app.config import get_settings
 from app.content_security import QuarantinedDocument
-from app.globbing import matches_any
 from app.control_plane import BackendControlPlaneClient
 from app.dependencies import get_document_workflow
+from app.globbing import matches_any
 from app.models import SourceDocument
-
 
 # Directories that never carry reviewable source. Walking them wastes minutes on
 # a Kotlin repository and fills the index with generated noise.
 SKIP_DIRECTORIES = {
-    ".git", ".gradle", ".idea", ".venv", "venv", "env", "__pycache__", "node_modules",
-    "build", "out", "dist", ".dart_tool", ".kotlin", "DerivedData", ".mypy_cache",
-    ".pytest_cache", ".ruff_cache", ".terraform",
+    ".git",
+    ".gradle",
+    ".idea",
+    ".venv",
+    "venv",
+    "env",
+    "__pycache__",
+    "node_modules",
+    "build",
+    "out",
+    "dist",
+    ".dart_tool",
+    ".kotlin",
+    "DerivedData",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".terraform",
 }
 
 # Code and build configuration only. An allowlist rather than a denylist: a
@@ -66,10 +80,41 @@ SKIP_DIRECTORIES = {
 # would be cited. Enforcing that at discovery is stronger than an exclusion list,
 # because there is no pattern to get wrong and nothing to keep in sync.
 SOURCE_SUFFIXES = {
-    ".kt", ".kts", ".java", ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs",
-    ".swift", ".m", ".mm", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".rb", ".php",
-    ".sh", ".bash", ".zsh", ".sql", ".gradle", ".toml", ".yaml", ".yml", ".json",
-    ".xml", ".properties", ".proto", ".graphql", ".tf",
+    ".kt",
+    ".kts",
+    ".java",
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".go",
+    ".rs",
+    ".swift",
+    ".m",
+    ".mm",
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".hpp",
+    ".cs",
+    ".rb",
+    ".php",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".sql",
+    ".gradle",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".xml",
+    ".properties",
+    ".proto",
+    ".graphql",
+    ".tf",
 }
 
 # Suffixes a caller might expect to be indexed, refused on purpose, so a dry run
@@ -129,7 +174,6 @@ def _iter_files(root: Path, excludes: tuple[str, ...]) -> list[Discovered]:
     return found
 
 
-
 def _count_prose(root: Path) -> int:
     """How many prose files were passed over, so the omission is visible."""
 
@@ -163,6 +207,22 @@ async def _run() -> None:
         action="store_true",
         help="Re-chunk and rewrite every file even when its manifest matches.",
     )
+    parser.add_argument(
+        "--start-after",
+        default="",
+        help=(
+            "Resume a forced local scan after this exact repository-relative path. "
+            "Fails closed when the path is not in the discovered source set."
+        ),
+    )
+    parser.add_argument(
+        "--stop-after",
+        default="",
+        help=(
+            "Stop after this exact repository-relative path. Used with --start-after "
+            "to create disjoint, deterministic recovery batches."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     arguments = parser.parse_args()
 
@@ -180,6 +240,29 @@ async def _run() -> None:
     files = _iter_files(root, excludes)
     if not files:
         raise SystemExit(f"No indexable source files found under {root}.")
+    if arguments.start_after or arguments.stop_after:
+        paths = [item.relative_path for item in files]
+        start_index = -1
+        stop_index = len(files) - 1
+        if arguments.start_after:
+            try:
+                start_index = paths.index(arguments.start_after)
+            except ValueError as error:
+                raise SystemExit(
+                    f"Resume marker {arguments.start_after!r} was not found under {root}."
+                ) from error
+        if arguments.stop_after:
+            try:
+                stop_index = paths.index(arguments.stop_after)
+            except ValueError as error:
+                raise SystemExit(
+                    f"Stop marker {arguments.stop_after!r} was not found under {root}."
+                ) from error
+        if stop_index <= start_index:
+            raise SystemExit("--stop-after must sort after --start-after.")
+        files = files[start_index + 1 : stop_index + 1]
+        if not files:
+            raise SystemExit("The selected source range is empty.")
     prose = _count_prose(root)
     print(f"discovered {len(files)} code files under {root}")
     if prose:
@@ -245,7 +328,9 @@ async def _run() -> None:
             continue
         except Exception as error:  # noqa: BLE001 - one bad file must not end the run
             failed += 1
-            print(f"  failed {item.relative_path}: {type(error).__name__}: {error}", file=sys.stderr)
+            print(
+                f"  failed {item.relative_path}: {type(error).__name__}: {error}", file=sys.stderr
+            )
             continue
         if result.operation == "UNCHANGED":
             unchanged += 1

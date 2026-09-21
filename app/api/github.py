@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import logging
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -72,7 +72,9 @@ async def github_webhook(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Repository identity is invalid.")
     project = await project_reader.find_by_repository(owner, repository)
     if project is None:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Repository is not mapped to an active project.")
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Repository is not mapped to an active project."
+        )
     if not project.schedule.github_merged_pr_enabled:
         return WebhookResponse(
             accepted=False,
@@ -80,7 +82,8 @@ async def github_webhook(
             project_id=project.project_id,
             repository=full_name,
         )
-    base = pull_request.get("base") if isinstance(pull_request.get("base"), dict) else {}
+    base_value = pull_request.get("base")
+    base = cast(dict[str, Any], base_value) if isinstance(base_value, dict) else {}
     branch = str(base.get("ref") or "")
     if branch not in project.repository.indexed_branches:
         return WebhookResponse(
@@ -209,7 +212,9 @@ async def github_webhook(
 
 def _verify_signature(body: bytes, signature: str | None, secret: str) -> None:
     if not secret:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Webhook secret is not configured.")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Webhook secret is not configured."
+        )
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     if not signature or not hmac.compare_digest(signature, expected):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid GitHub webhook signature.")
