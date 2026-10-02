@@ -2,7 +2,7 @@ cryptography==50.0.0
 fastapi==0.141.1
 httpx==0.28.1
 chromadb-client==1.5.2
-pyjwt[crypto]==2.13.0
+pyjwt[crypto]==2.15.0
 pydantic-settings==2.15.0
 prometheus-client==0.26.0
 azure-identity==1.24.0
