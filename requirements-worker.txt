@@ -1,4 +1,4 @@
 -r requirements.txt
 azure-servicebus==7.14.3
-docling==2.120.1
+docling==2.132.0
 transformers==5.10.1
